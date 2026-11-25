@@ -1,0 +1,60 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+  MIMIR_REPO: https://github.com/Mimir-IM/mimir
+  MIMIR_REV: 883334b5990b4e07d6d3362f98777f23fb156664
+  YGG_STREAM_REPO: https://github.com/Revertron/ygg_stream
+  YGG_STREAM_REV: 94199be31bb099bde5a9cb4baed26544759bb5c7
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            archive: tar.gz
+          - os: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mimir-desktop
+      - name: Core sources (pinned)
+        shell: bash
+        run: |
+          for p in "mimir $MIMIR_REPO $MIMIR_REV" "ygg_stream $YGG_STREAM_REPO $YGG_STREAM_REV"; do
+            set -- $p
+            git init -q upstream/$1 && git -C upstream/$1 fetch -q --depth 1 $2 $3 && git -C upstream/$1 checkout -q FETCH_HEAD
+          done
+      - name: System libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libasound2-dev libxkbcommon-dev libxdo-dev libayatana-appindicator3-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mimir-desktop
+      - name: Build
+        working-directory: mimir-desktop
+        run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        working-directory: mimir-desktop
+        run: |
+          name=mimir-desktop-${GITHUB_REF_NAME}-${{ runner.os == 'Windows' && 'windows-x86_64' || 'linux-x86_64' }}
+          mkdir -p dist/$name
+          cp LICENSE README.md dist/$name/
+          if [ "${{ runner.os }}" = Windows ]; then
+            cp target/release/mimir-desktop.exe dist/$name/
+            (cd dist && 7z a -tzip ../$name.zip $name >/dev/null)
+          else
+            cp target/release/mimir-desktop dist/$name/
+            tar -C dist -czf $name.tar.gz $name
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: mimir-desktop/mimir-desktop-*.${{ matrix.archive }}
