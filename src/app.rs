@@ -1,6 +1,6 @@
 use crate::{
     core::{self, events::{Bridge, Event}, net, worker::{WorkResult, Worker}},
-    i18n::{trf, Key, Lang},
+    i18n::{tr, trf, Key, Lang},
     model::{attachment::{is_present, AttachmentMeta, Transfer}, chat_key::ChatKey, chat_list::build_chat_list, group::{self, GroupStatus, Members}, timeline::{Timeline, REACTION}, AppState, OpenChat},
     paths::DataPaths,
     settings::Settings,
@@ -34,13 +34,16 @@ pub struct MimirDesktop {
     pub test_tmp: Option<tempfile::TempDir>,
 }
 
-/// The window (I2): `backup::restore` (recovery, and a staged import that can take minutes) runs on a thread behind a
+/// The window: `backup::restore` (recovery, and a staged import that can take minutes) runs on a thread behind a
 /// progress screen, then the core opens. eframe shows the window only after its first frame, so nothing may block here.
 pub enum Startup {
     /// `ext`: what other launches ask, handed to the app once it opens.
-    Restoring { lang: Lang, rx: Receiver<Option<Result<bool, String>>>, ext: Option<Receiver<crate::platform::Ext>> },
+    /// `rx`: what `backup::restore` did; an error comes with whether the old data is still in restore_old.
+    Restoring { lang: Lang, root: std::path::PathBuf, rx: Receiver<Option<Result<bool, (String, bool)>>>, ext: Option<Receiver<crate::platform::Ext>> },
     /// Another instance holds the restore lock: say so and close.
     Busy(Lang),
+    /// The old data could not be put back (the text says why): the core is not opened, it would start an empty account.
+    Failed(Lang, String),
     Ready(Box<MimirDesktop>),
 }
 
@@ -48,6 +51,7 @@ impl Startup {
     /// `link`: this launch's own link, handled like a forwarded one once the app is up.
     pub fn new(cc: &eframe::CreationContext<'_>, instance: crate::platform::Instance, link: Option<String>) -> Self {
         let root = DataPaths::default_for_user().root;
+        let paths_root = root.clone();
         // The settings as they were before a staged import replaces them: only the screen's language and theme.
         let settings = Settings::load(&DataPaths::under(&root).settings_file);
         theme::install(&cc.egui_ctx);
@@ -56,8 +60,11 @@ impl Startup {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::backup::restore(&DataPaths::under(&root)));
+            let paths = DataPaths::under(&root);
+            let restored = crate::backup::restore(&paths).map(|r| r.map_err(|e| (e, crate::backup::old_data_kept(&paths.root))));
+            let _ = tx.send(restored);
             ctx.request_repaint();
+            crate::media::stage::sweep_stale();
         });
         let (ext_tx, ext) = std::sync::mpsc::channel();
         if let Some(link) = link {
@@ -68,7 +75,7 @@ impl Startup {
             let _ = ext_tx.send(msg.map_or(crate::platform::Ext::Show, crate::platform::Ext::Link));
             ctx.request_repaint();
         });
-        Startup::Restoring { lang: settings.lang.unwrap_or_else(Lang::from_system), rx, ext: Some(ext) }
+        Startup::Restoring { lang: settings.lang.unwrap_or_else(Lang::from_system), root: paths_root, rx, ext: Some(ext) }
     }
 }
 
@@ -83,15 +90,17 @@ impl eframe::App for Startup {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if let Startup::Restoring { lang, rx, ext } = self {
+        if let Startup::Restoring { lang, root, rx, ext } = self {
             let restored = match rx.try_recv() {
                 Ok(r) => Some(r),
-                Err(TryRecvError::Disconnected) => Some(Some(Err("restore stopped".into()))),
+                // The thread died: the same recovery check as after an error, old data left behind must not meet a new core.
+                Err(TryRecvError::Disconnected) => Some(Some(Err(("restore stopped".into(), crate::backup::old_data_kept(root))))),
                 Err(TryRecvError::Empty) => None,
             };
             let next = restored.map(|r| match r {
+                Some(Err((e, true))) => Startup::Failed(*lang, trf(*lang, Key::DataNotRestored, &[&e])),
                 Some(restored) => {
-                    let mut app = MimirDesktop::open(ui.ctx(), restored);
+                    let mut app = MimirDesktop::open(ui.ctx(), restored.map_err(|(e, _)| e));
                     if let Some(ext) = ext.take() {
                         crate::platform::relay(ext, app.events.clone(), ui.ctx().clone());
                     }
@@ -108,10 +117,15 @@ impl eframe::App for Startup {
         match self {
             Startup::Ready(app) => app.ui(ui, frame),
             Startup::Restoring { lang, .. } => {
-                crate::ui::welcome::progress(ui, *lang, &p, Key::Restoring, false);
+                crate::ui::welcome::progress(ui, *lang, &p, tr(*lang, Key::Restoring), false);
             }
             Startup::Busy(lang) => {
-                if crate::ui::welcome::progress(ui, *lang, &p, Key::RestoreRunning, true) {
+                if crate::ui::welcome::progress(ui, *lang, &p, tr(*lang, Key::RestoreRunning), true) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Startup::Failed(lang, text) => {
+                if crate::ui::welcome::progress(ui, *lang, &p, text, true) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
@@ -132,7 +146,7 @@ impl MimirDesktop {
         // ponytail: a core that fails to open aborts startup with a panic, no error screen.
         let core = core::open(&paths).expect("failed to open Mimir core");
         // An import is always a sibling (the phone stays in use): this copy needs its own client id, before start.
-        // Retried at every start until it succeeds (M1).
+        // Retried at every start until it succeeds.
         let mut regen_failed = None;
         if restored == Ok(true) || crate::backup::regenerate_pending(&paths.root) {
             match core.regenerate_client_id() {
@@ -174,8 +188,8 @@ impl MimirDesktop {
         app.refresh_requests();
         invites::refresh(&mut app);
         if let Some(cfg) = net_cfg {
-            let (events, wake) = (tx.clone(), ctx.clone());
-            let show = move |title, body| notify::show(title, body, events.clone(), wake.clone());
+            let (events, wake, focus) = (tx.clone(), ctx.clone(), app.focus.clone());
+            let show = move |title, body| notify::show(title, body, focus.lock().unwrap_or_else(|p| p.into_inner()).lang, events.clone(), wake.clone());
             let bridge = Bridge::new(tx, ctx.clone()).notifying(&app.core, app.focus.clone(), show);
             net::start(&app.worker, cfg, bridge);
         }
@@ -223,7 +237,7 @@ impl MimirDesktop {
     /// Applies pending core events; the chat list is rebuilt only when one of them can change it.
     /// Messages in the open chat count as read only while the window has focus.
     pub fn drain_events(&mut self, ctx: &egui::Context) {
-        let focused = ctx.input(|i| i.focused);
+        let focused = self.window_focused(ctx);
         let mut refresh = false;
         let mut requests = false;
         let mut mediators = false;
@@ -232,7 +246,7 @@ impl MimirDesktop {
             match &e {
                 Event::ContactConnected { pubkey } => {
                     self.state.online.insert(pubkey.clone());
-                    // The peer's profile (and avatar) may have come with the connection; no event says so (CA §6.2),
+                    // The peer's profile (and avatar) may have come with the connection; no event says so,
                     // and it is written over the same file. The chat list is rebuilt below, so a new path shows too.
                     // ponytail: info that lands after this event shows on the next connect (or once its mtime moves).
                     let avatar = self.core.get_contact_by_pubkey(pubkey.clone()).and_then(|c| crate::media::avatar::resolve(&self.paths.core_dir, &c.avatar));
@@ -250,11 +264,11 @@ impl MimirDesktop {
                     // A send job of ours runs for this chat and has not stored its row yet.
                     let pending = self.state.pending_sends.get(&key).copied().unwrap_or(0);
                     let ours = pending > self.state.sending.iter().filter(|(k, _)| *k == key).count();
-                    // Rows are read only for our own send or the open chat; the list refreshes either way (I1).
+                    // Rows are read only for our own send or the open chat; the list refreshes either way.
                     if ours || open_mut(&mut self.state, key).is_some() {
                         let stored = if *is_group { self.core.get_group_message(*target_id, *message_id) } else { self.core.get_message(*message_id) };
                         // Our attachment row is uploading until its job ends. A sibling's outgoing row (stored delivered,
-                        // CG sibling_sync) is not ours even while we send; Saved Messages rows are delivered at once.
+                        // sibling sync) is not ours even while we send; Saved Messages rows are delivered at once.
                         let mine = |m: &&mimir::StoredMessage| ours && ATTACHMENT_TYPES.contains(&m.msg_type) && (!m.delivered || key == ChatKey::SAVED);
                         if let Some((m, meta)) = stored.as_ref().filter(mine).and_then(|m| Some((m, AttachmentMeta::parse(m.data.as_deref()?)?))) {
                             self.state.transfers.insert(m.guid, Transfer::Uploading { done: 0, total: meta.size });
@@ -279,7 +293,7 @@ impl MimirDesktop {
                     }
                 }
                 Event::GroupMessageDeleted { chat_id, guid } => {
-                    // The core has already deleted the row (CG §2).
+                    // The core has already deleted the row.
                     if let Some(chat) = open_mut(&mut self.state, ChatKey::Group(*chat_id)) {
                         let t = &mut chat.timeline;
                         if let Some(i) = t.msgs.iter().position(|m| m.guid == *guid) {
@@ -342,7 +356,7 @@ impl MimirDesktop {
                     }
                 }
                 Event::GroupMessageDelivered { chat_id, guid } => {
-                    // The mediator accepted it (CG §5): the single tick.
+                    // The mediator accepted it: the single tick.
                     if let Some(chat) = open_mut(&mut self.state, ChatKey::Group(*chat_id)) {
                         if let Some(m) = chat.timeline.msgs.iter_mut().find(|m| m.guid == *guid) {
                             m.delivered = true;
@@ -361,7 +375,7 @@ impl MimirDesktop {
                     let t = if *is_upload { Transfer::Uploading { done, total } } else { Transfer::Downloading { done, total } };
                     self.state.transfers.insert(*guid, t);
                 }
-                // Neither event's file_path nor FileDownloaded's chat_id (always 0) can be trusted (CA §0.4-0.5):
+                // Neither event's file_path nor FileDownloaded's chat_id (always 0) can be trusted:
                 // the row is found by guid and its file is at files_dir/name.
                 Event::FileReceived { guid, .. } | Event::FileDownloaded { guid, .. } => {
                     self.state.transfers.remove(guid);
@@ -407,8 +421,8 @@ impl MimirDesktop {
                 }
                 Event::WorkDone(WorkResult::GroupJoined { chat_id }) => join_group::joined(self, *chat_id),
                 Event::WorkDone(WorkResult::InviteAccepted { chat_id }) => invites::accepted(self, *chat_id),
-                Event::WorkDone(WorkResult::Preview(info)) => join_group::preview_done(self, info.clone()),
-                // Live (AG §5.12): the list and the toolbar icon follow the event, unlike Android's onResume.
+                Event::WorkDone(WorkResult::Preview { token, info }) => join_group::preview_done(self, *token, info.clone()),
+                // Live: the list and the toolbar icon follow the event, unlike Android's onResume.
                 Event::GroupInviteReceived { .. } => invites::refresh(self),
                 Event::MediatorAuthenticated { .. } => join_group::retry_lookup(self),
                 Event::WorkDone(WorkResult::Failed { what: "join_public_group", err }) if self.state.join.as_ref().is_some_and(|d| d.joining) => {
@@ -435,6 +449,7 @@ impl MimirDesktop {
                     crate::ui::settings::job_done(self, crate::ui::settings::Job::Orphans, text);
                 }
                 Event::WorkDone(WorkResult::Files(rows)) => crate::ui::settings::files_listed(self, rows.clone()),
+                Event::WorkDone(WorkResult::FileDeleted { storage_name, err }) => crate::ui::settings::file_deleted(self, storage_name, err.as_ref()),
                 Event::WorkDone(WorkResult::BackupSaved { path, err }) => crate::ui::settings::backup_saved(self, path.as_ref(), err.as_ref()),
                 Event::WorkDone(WorkResult::BackupPicked { path, valid }) => crate::ui::settings::backup_picked(self, path.clone(), *valid),
                 Event::WorkDone(WorkResult::BackupStaged { err }) => crate::ui::settings::import_staged(self, ctx, err.as_ref()),
@@ -446,6 +461,7 @@ impl MimirDesktop {
                     }
                 }
                 Event::WorkDone(WorkResult::Left { chat_id } | WorkResult::GroupDeleted { chat_id }) => group_info::closed(self, *chat_id),
+                Event::WorkDone(WorkResult::HistoryCleared { chat_id }) => group_info::history_cleared(self, *chat_id),
                 Event::WorkDone(WorkResult::Invited { name }) => self.notice_text(trf(self.lang, Key::InviteSentTo, &[name])),
                 Event::WorkDone(WorkResult::Banned { chat_id, pubkey, name }) => {
                     group_info::member_changed(self, *chat_id, pubkey, 0x01);
@@ -478,7 +494,7 @@ impl MimirDesktop {
                 }
                 Event::IncomingCall { pubkey } => self.state.incoming_call = Some((pubkey.clone(), Instant::now())),
                 Event::DraftSynced { chat_type, chat_id } => {
-                    // CG §1j: 0 = contact (or Saved Messages), 1 = group; anything else is not a chat we know.
+                    // 0 = contact (or Saved Messages), 1 = group; anything else is not a chat we know.
                     let key = match chat_type {
                         0 => Some(ChatKey::Contact(*chat_id)),
                         1 => Some(ChatKey::Group(*chat_id)),
@@ -523,7 +539,7 @@ impl MimirDesktop {
             // ponytail: a failed mark-read only leaves the unread badge until the next open.
             let _ = match chat.key {
                 ChatKey::Contact(id) => self.core.mark_all_read(id),
-                // P2-R9: storage-only, inline (ruling PF-2); not sibling-synced by the core.
+                // Storage-only, inline; not sibling-synced by the core.
                 ChatKey::Group(id) => self.core.mark_all_group_read(id),
             };
             refresh = true;
@@ -549,6 +565,12 @@ impl MimirDesktop {
         }
     }
 
+    /// The window is shown, focused and not minimised. Live input: while hidden, eframe runs `logic` alone and
+    /// `i.focused` keeps the last shown frame's value.
+    fn window_focused(&self, ctx: &egui::Context) -> bool {
+        !self.state.hidden && ctx.input(|i| i.raw.focused && i.viewport().minimized != Some(true))
+    }
+
     fn refresh_last_seen(&mut self, pubkey: &[u8]) {
         if let Some(chat) = self.state.open_chat.as_mut().filter(|c| c.pubkey == pubkey) {
             if let ChatKey::Contact(id) = chat.key {
@@ -559,7 +581,7 @@ impl MimirDesktop {
 
     /// A send job of `chat` ended: its row stops uploading and is re-read (a group upload added key and server).
     /// A 1:1 `Connection` error is a queued send (the core resends on connect); so is a group one once the file is
-    /// uploaded (`resend_undelivered`). A group row left without a key can never be fetched (CA §9.1): reported.
+    /// uploaded (`resend_undelivered`). A group row left without a key can never be fetched: reported.
     fn attachment_sent(&mut self, chat: ChatKey, err: Option<&mimir::MimirError>) {
         if let Some(n) = self.state.pending_sends.get_mut(&chat) {
             *n = n.saturating_sub(1);
@@ -599,7 +621,7 @@ impl MimirDesktop {
         }
     }
 
-    /// Writes other members' renames and avatars into the local chat (P2-R7), once per stored ChatInfoChanged row.
+    /// Writes other members' renames and avatars into the local chat, once per stored ChatInfoChanged row.
     fn apply_chat_info(&mut self, chat_id: i64) {
         let after = self.settings.chat_info_applied.get(&chat_id).copied().unwrap_or(0);
         if let Some(id) = group::apply_chat_info(&self.core, chat_id, after) {
@@ -626,7 +648,7 @@ impl MimirDesktop {
     }
 }
 
-/// Message types whose data is attachment JSON (CA §0.2): image, file/voice, video.
+/// Message types whose data is attachment JSON: image, file/voice, video.
 const ATTACHMENT_TYPES: [i32; 3] = [1, 3, 4];
 
 /// How long a status line notice or error stays.
@@ -662,8 +684,7 @@ impl eframe::App for MimirDesktop {
             self.state.hidden = false; // brought back by the OS (a Wayland taskbar, say), not by us
         }
         let chat = self.state.open_chat.as_ref().map(|c| c.key);
-        // Live input: while hidden, eframe runs `logic` alone and `i.focused` keeps the last shown frame's value.
-        let focused = !self.state.hidden && ctx.input(|i| i.raw.focused && i.viewport().minimized != Some(true));
+        let focused = self.window_focused(ctx);
         *self.focus.lock().unwrap_or_else(|p| p.into_inner()) = Focus { chat, focused, lang: self.lang };
     }
 
@@ -673,6 +694,62 @@ impl eframe::App for MimirDesktop {
 
     fn on_exit(&mut self) {
         crate::ui::composer::save_open_draft(self);
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use egui::{ViewportCommand, ViewportEvent, ViewportId};
+    use egui_kittest::{kittest::Queryable as _, Harness};
+
+    type Restored = Option<Result<bool, (String, bool)>>;
+
+    /// The startup screen, waiting for what `rx` says the restore did.
+    fn startup(rx: Receiver<Restored>) -> Harness<'static, Startup> {
+        Harness::builder().with_context_setup(theme::install).build_eframe(move |_| Startup::Restoring { lang: Lang::Ru, root: Default::default(), rx, ext: None })
+    }
+
+    fn commands<'h>(h: &'h Harness<'static, Startup>) -> &'h [ViewportCommand] {
+        &h.output().viewport_output[&ViewportId::ROOT].commands
+    }
+
+    #[test]
+    fn close_waits_for_the_restore() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut h = startup(rx);
+        h.step();
+        h.input_mut().viewports.entry(ViewportId::ROOT).or_default().events.push(ViewportEvent::Close);
+        h.step();
+        assert!(commands(&h).contains(&ViewportCommand::CancelClose), "{:?}", commands(&h));
+        assert!(matches!(h.state(), Startup::Restoring { .. }));
+    }
+
+    #[test]
+    fn restore_thread_gone_with_old_data_left_never_opens_the_core() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("restore_old/mimir")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Restored>();
+        drop(tx);
+        let root = tmp.path().to_path_buf();
+        let mut h = Harness::builder().with_context_setup(theme::install).build_eframe(move |_| Startup::Restoring { lang: Lang::Ru, root, rx, ext: None });
+        h.step();
+        h.step();
+        assert!(matches!(h.state(), Startup::Failed(..)), "no app, so no new empty account");
+    }
+
+    #[test]
+    fn old_data_not_back_never_opens_the_core() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some(Err(("locked".into(), true)))).unwrap();
+        let mut h = startup(rx);
+        h.step();
+        h.step();
+        assert!(matches!(h.state(), Startup::Failed(..)), "no app, so no new empty account");
+        assert!(h.query_by_label_contains("Не удалось вернуть ваши данные: locked").is_some());
+        h.get_by_label("Закрыть").click();
+        h.step();
+        assert!(commands(&h).contains(&ViewportCommand::Close));
     }
 }
 
@@ -731,6 +808,20 @@ mod tests {
         h.run();
         assert_eq!(h.state().core.get_unread_count(c), 0, "read once the window has focus again");
         assert_eq!(h.state().state.chats.iter().find(|r| r.key == ChatKey::Contact(c)).unwrap().unread, 0);
+    }
+
+    #[test]
+    fn hidden_window_leaves_open_chat_unread() {
+        // Hidden to the tray, egui's input still says focused (the last shown frame's): no read receipt.
+        let (mut h, c, tx) = open_contact_chat();
+        h.state_mut().state.hidden = true;
+        let id = h.state().core.add_local_message(c, 1, 0, true, false, T, 0, 0, "привет".as_bytes().to_vec()).unwrap();
+        tx.send(received(c, id, 0, 0)).unwrap();
+        h.run();
+        assert_eq!(h.state().core.get_unread_count(c), 1, "not read while hidden");
+        h.state_mut().state.hidden = false;
+        h.run();
+        assert_eq!(h.state().core.get_unread_count(c), 0, "read once shown again");
     }
 
     #[test]
@@ -1078,7 +1169,7 @@ mod tests {
         tx.send(Event::FileProgress { guid: 12, bytes_done: 1, total_bytes: 2, is_upload: true }).unwrap();
         h.run();
         assert_eq!(h.state().state.transfers.get(&12), Some(&Transfer::Uploading { done: 1, total: 2 }));
-        // The core always reports chat_id 0 (CA §0.5): the row is found by guid in the open chat and re-read.
+        // The core always reports chat_id 0: the row is found by guid in the open chat and re-read.
         let newer = br#"{"name":"Ab3d.jpg","originalName":"p.jpg","size":10,"mimeType":"image/jpeg","hash":"cd","key":"a2V5","server":"00","text":"x"}"#;
         core.update_group_message_data(7, 11, newer.to_vec()).unwrap();
         tx.send(Event::FileDownloaded { chat_id: 0, guid: 11, file_path: "stale".into() }).unwrap();
@@ -1118,7 +1209,7 @@ mod tests {
         core.add_local_message(c, 23, 0, false, false, T + 23, 0, 3, br#"{"name":"Cc.pdf","size":5,"hash":"ab"}"#.to_vec()).unwrap();
         std::fs::write(files.join("Cc.pdf"), b"12345").unwrap();
         h.state_mut().state.transfers.insert(23, Transfer::Uploading { done: 1, total: 5 });
-        // P2P: the file_path given is the stale temp path (CA §0.4); only the guid counts.
+        // P2P: the file_path given is the stale temp path; only the guid counts.
         tx.send(Event::FileReceived { pubkey: vec![7; 32], guid: 21, meta_json: "{}".into(), file_path: "stale".into() }).unwrap();
         h.run();
         assert!(!h.state().state.transfers.contains_key(&21));
@@ -1166,7 +1257,7 @@ mod tests {
         let id = core.add_group_message(7, 0, 12, core.public_key(), T, 3, false, meta.to_vec(), 0, false).unwrap();
         h.state_mut().state.pending_sends.insert(ChatKey::Group(7), 2);
         tx.send(Event::OutgoingMessageStored { is_group: true, target_id: 7, message_id: id }).unwrap();
-        // Uploaded, then no mediator: resend_undelivered sends it later as it is (CA §2.3).
+        // Uploaded, then no mediator: resend_undelivered sends it later as it is.
         let err = mimir::MimirError::Connection("no mediator".into());
         tx.send(Event::WorkDone(WorkResult::AttachmentSent { chat: ChatKey::Group(7), err: Some(err) })).unwrap();
         h.run();
@@ -1192,7 +1283,7 @@ mod tests {
 
     #[test]
     fn sibling_send_to_a_closed_chat_refreshes_the_list() {
-        // I1: our other device's message to a chat that is not open still moves the chat list.
+        // Our other device's message to a chat that is not open still moves the chat list.
         let (mut h, _, tx) = open_contact_chat();
         let core = h.state().core.clone();
         let b = core.add_contact(vec![8; 32], "Борис".into()).unwrap();

@@ -1,5 +1,5 @@
 //! Group invites dialog (Android InviteListActivity + GroupInviteActivity): accept or decline each invite.
-//! Accepting syncs history and joins on the mediator, so it runs on the worker; declining only deletes the row (P2-R10).
+//! Accepting syncs history and joins on the mediator, so it runs on the worker; declining only deletes the row.
 use crate::{
     app::MimirDesktop,
     core::worker::WorkResult,
@@ -38,7 +38,7 @@ pub fn open(app: &mut MimirDesktop) {
     app.state.show_invites = true;
 }
 
-/// Group invites plus invitations to mediators we do not use yet (Android notifies those, P2-R11 defers that).
+/// Group invites plus invitations to mediators we do not use yet (Android notifies those; not done here).
 pub fn count(app: &MimirDesktop) -> usize {
     app.state.invites.len() + app.state.mediators_ui.invitations.len()
 }
@@ -68,7 +68,7 @@ fn accept(app: &mut MimirDesktop, id: i64, chat_id: i64) {
     }));
 }
 
-/// Local only: nothing is sent to the inviter or the mediator (P2-R10).
+/// Local only: nothing is sent to the inviter or the mediator.
 fn decline(app: &mut MimirDesktop, id: i64) {
     match app.core.delete_invite(id) {
         Ok(()) => {
@@ -123,7 +123,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
             for i in &app.state.invites {
                 ui.separator();
                 ui.horizontal(|ui| {
-                    // AM §9: 64 px, corner 8, in the invites list.
+                    // 64 px, corner 8, in the invites list.
                     let base = avatar_seed_color(i.chat_id.to_string().as_bytes(), ui.visuals().dark_mode);
                     avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &i.chat_avatar).as_deref(), base, 64., 4.);
                     ui.vertical(|ui| {

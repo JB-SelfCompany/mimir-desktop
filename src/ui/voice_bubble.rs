@@ -1,4 +1,4 @@
-//! Voice message bubble (P3-R4, fixes AM §12.A): ▶/⏸ in the 40 px icon box, a seek bar and the time; no file name.
+//! Voice message bubble (no file name, unlike Android): ▶/⏸ in the 40 px icon box, a seek bar and the time; no file name.
 use crate::{
     i18n::{tr, Key, Lang},
     media::player::PlayState,

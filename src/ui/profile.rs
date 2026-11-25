@@ -37,19 +37,18 @@ pub fn avatar_saved(app: &mut MimirDesktop, path: &str) {
         app.state.thumbs.invalidate(&p);
     }
     let p = &mut app.state.profile;
+    p.pick.preview = None;
     if p.loaded {
         p.avatar = path.to_string();
-        p.pick.preview = None;
     }
 }
 
-/// A picked picture: prepared (≤ 48 KiB, contacts drop more, CA §5), then stored by the worker (P3-R7: change only).
+/// A picked picture: prepared (≤ 48 KiB, contacts drop more), then stored by the worker (change only).
+/// Also after the modal closed while the picker was open: the picture is still saved, a bad one said in the status line.
 fn poll_avatar(app: &mut MimirDesktop, ctx: &egui::Context) {
+    let lang = app.lang;
     let p = &mut app.state.profile;
-    if let Some(e) = p.pick.poll(ctx) {
-        let key = if e == AvatarError::TooLarge { Key::AvatarTooLarge } else { Key::ErrorLoadingAvatarPicture };
-        p.avatar_error = Some(tr(app.lang, key).to_string());
-    }
+    let error = p.pick.poll(ctx).map(|e| tr(lang, if e == AvatarError::TooLarge { Key::AvatarTooLarge } else { Key::ErrorLoadingAvatarPicture }).to_string());
     if let Some(bytes) = p.pick.bytes.take() {
         p.avatar_error = None;
         app.worker.submit(Box::new(move |core| match core.update_account_avatar(ACCOUNT, bytes) {
@@ -57,21 +56,28 @@ fn poll_avatar(app: &mut MimirDesktop, ctx: &egui::Context) {
             Err(e) => WorkResult::Failed { what: "update_account_avatar", err: e.to_string() },
         }));
     }
+    match error {
+        Some(text) if app.state.show_profile => app.state.profile.avatar_error = Some(text),
+        Some(text) => app.error_text(text),
+        None => {}
+    }
 }
 
 fn close(app: &mut MimirDesktop) {
-    let p = std::mem::take(&mut app.state.profile);
-    // ponytail: storage write errors are ignored; the field reverts to the stored value next open.
-    if p.name != p.orig_name {
-        let _ = app.core.update_account_name(ACCOUNT, p.name);
-    }
-    if p.info != p.orig_info {
-        let _ = app.core.update_account_info(ACCOUNT, p.info);
+    let mut p = std::mem::take(&mut app.state.profile);
+    // A picker still open keeps going: its answer is handled after the modal closed.
+    app.state.profile.pick.picking = p.pick.picking.take();
+    // A failed write is reported; the field shows the stored value next open.
+    let name = (p.name != p.orig_name).then(|| app.core.update_account_name(ACCOUNT, p.name)).and_then(Result::err);
+    let info = (p.info != p.orig_info).then(|| app.core.update_account_info(ACCOUNT, p.info)).and_then(Result::err);
+    if let Some(e) = name.or(info) {
+        app.error_text(format!("{}: {e}", tr(app.lang, Key::Profile)));
     }
     app.state.show_profile = false;
 }
 
 pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
+    poll_avatar(app, ctx);
     if !app.state.show_profile {
         return;
     }
@@ -86,7 +92,6 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         p.info = a.map(|a| a.info).unwrap_or_default();
         (p.orig_name, p.orig_info) = (p.name.clone(), p.info.clone());
     }
-    poll_avatar(app, ctx);
     let link = contact_link(&pubkey, &app.state.profile.name);
     // ponytail: the QR dialog replaces the profile modal instead of stacking on it.
     if let Some(tex) = app.state.profile.qr.clone() {
@@ -113,7 +118,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         dialog_title(ui, tr(lang, Key::Profile));
         let p = &mut app.state.profile;
         ui.vertical_centered(|ui| {
-            // AM §9: 128 px, corner 8; the placeholder is Android's white-to-grey button_rounded_white.
+            // 128 px, corner 8; the placeholder is Android's white-to-grey button_rounded_white.
             let path = resolve(&app.paths.core_dir, &p.avatar);
             if pick_button(ui, &mut app.state.thumbs, &p.pick, path.as_deref(), Color32::from_gray(0xC8), 128., tr(lang, Key::ChangeAvatar)) {
                 p.pick.start(ui.ctx(), tr(lang, Key::Image), ACCOUNT_MAX);
@@ -125,7 +130,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         let l = field_label(ui, &pal, tr(lang, Key::MyName));
         ui.add(TextEdit::singleline(&mut p.name).hint_text(tr(lang, Key::NameHint)).desired_width(f32::INFINITY)).labelled_by(l.id);
         let l = field_label(ui, &pal, tr(lang, Key::Description));
-        ui.add(TextEdit::singleline(&mut p.info).hint_text(tr(lang, Key::Description)).desired_width(f32::INFINITY)).labelled_by(l.id);
+        ui.add(TextEdit::singleline(&mut p.info).desired_width(f32::INFINITY)).labelled_by(l.id);
         field_label(ui, &pal, tr(lang, Key::MyPublicKey));
         let key = hex::encode_upper(&pubkey);
         let (a, b) = key.split_at(key.len() / 2);
@@ -161,7 +166,7 @@ mod tests {
 
     #[test]
     fn avatar_button_waits_for_the_open_picker() {
-        // M7: a second click while a pick runs must not open another picker (it dropped the first answer).
+        // A second click while a pick runs must not open another picker (it dropped the first answer).
         let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
         h.state_mut().state.show_profile = true;
         h.run();
@@ -182,8 +187,16 @@ mod tests {
         std::fs::write(&src, crate::test_support::png_bytes(900, 600, [40, 90, 200])).unwrap();
         h.state_mut().state.show_profile = true;
         h.run();
-        // P3-R7: the core cannot clear an account avatar, so there is nothing to remove it with.
-        assert!(h.query_all_by_role(eframe::egui::Role::Button).all(|n| !n.accesskit_node().label().unwrap_or_default().to_lowercase().contains("удал")));
+        // The core cannot clear an account avatar, so there is nothing to remove it with: no such button, and
+        // no menu on the avatar that could hold one.
+        let buttons = |h: &egui_kittest::Harness<'static, crate::app::MimirDesktop>| -> Vec<String> {
+            h.query_all_by_role(eframe::egui::Role::Button).map(|n| n.accesskit_node().label().unwrap_or_default().to_lowercase()).collect()
+        };
+        let before = buttons(&h);
+        assert!(before.iter().all(|l| !["удал", "убра", "сброс"].iter().any(|w| l.contains(w))), "{before:?}");
+        h.get_by_label("Изменить аватар").click_secondary();
+        h.run();
+        assert_eq!(buttons(&h), before, "a right click opens nothing");
         set_picked(src);
         h.get_by_label("Изменить аватар").click();
         let core = h.state().core.clone();
@@ -192,8 +205,35 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.len() <= ACCOUNT_MAX, "{}", bytes.len());
         assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 256);
-        // The stored picture (not the picker's preview) is what the profile shows, 128 px (AM §9).
+        // The stored picture (not the picker's preview) is what the profile shows, 128 px.
         run_until(&mut h, "the stored avatar", |h| h.state().state.profile.pick.preview.is_none() && textured(h).contains(&eframe::egui::vec2(128., 128.)));
+    }
+
+    #[test]
+    fn closing_during_a_pick_still_uses_its_answer() {
+        use crate::{media::avatar::{prepare, AvatarError, Picked, ACCOUNT_MAX}, test_support::run_until};
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        h.state_mut().state.show_profile = true;
+        h.run();
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().state.profile.pick.picking = Some(rx);
+        h.get_by_label("Закрыть").click();
+        h.run();
+        assert!(!h.state().state.show_profile);
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("me.png");
+        std::fs::write(&src, crate::test_support::png_bytes(300, 200, [40, 90, 200])).unwrap();
+        let image = eframe::egui::ColorImage::new([1, 1], vec![eframe::egui::Color32::WHITE]);
+        tx.send(Ok(Picked { bytes: prepare(&src, ACCOUNT_MAX).unwrap(), image })).unwrap();
+        let core = h.state().core.clone();
+        run_until(&mut h, "update_account_avatar", |_| !core.get_account(1).unwrap().avatar.is_empty());
+        // A bad picture picked after the modal closed is said in the status line.
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().state.profile.pick.picking = Some(rx);
+        tx.send(Err(AvatarError::TooLarge)).unwrap();
+        h.run();
+        let text = crate::i18n::tr(crate::i18n::Lang::Ru, crate::i18n::Key::AvatarTooLarge);
+        assert_eq!(h.state().state.status.as_ref().map(|s| s.0.as_str()), Some(text));
     }
 
     #[test]

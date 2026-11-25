@@ -11,7 +11,7 @@ use eframe::egui::{
 use std::path::Path;
 use time::{OffsetDateTime, UtcOffset};
 
-/// A 48 px avatar (AM §9) with 8 px above and below.
+/// A 48 px avatar with 8 px above and below.
 const ROW_H: f32 = 64.;
 const RIGHT_W: f32 = 46.;
 
@@ -50,7 +50,7 @@ fn row(ui: &mut Ui, r: &ChatRow, selected: bool, p: &Palette, thumbs: &mut Thumb
     let dark = ui.visuals().dark_mode;
     let g = ui.painter();
     if selected {
-        g.rect_filled(rect, 0., if dark { Color32::from_rgb(0x2a, 0x2a, 0x2a) } else { Color32::from_rgb(0xE6, 0xE6, 0xE6) });
+        g.rect_filled(rect, 0., p.selected);
         g.rect_filled(Rect::from_min_size(rect.min, vec2(3., ROW_H)), 0., p.accent);
     } else if resp.hovered() {
         g.rect_filled(rect, 0., p.divider);
@@ -71,7 +71,7 @@ fn row(ui: &mut Ui, r: &ChatRow, selected: bool, p: &Palette, thumbs: &mut Thumb
     let tg = g.with_clip_rect(clip);
     let mut name_x = text_x;
     if r.group.is_some() {
-        // AG §2: a 16 px people icon at alpha .7 before the name, for groups and channels alike.
+        // A 16 px people icon at alpha .7 before the name, for groups and channels alike.
         paint_people(&tg, pos2(text_x, rect.top() + 12.), 16., p.text.gamma_multiply(0.7));
         name_x += 20.;
     }

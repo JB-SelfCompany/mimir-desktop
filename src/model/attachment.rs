@@ -1,11 +1,11 @@
-//! Attachment metadata (the JSON body of types 1, 3, 4; CA §3), where its file lives, its transfer state and the
-//! manual download (P3-R9).
+//! Attachment metadata (the JSON body of types 1, 3, 4), where its file lives, its transfer state and the
+//! manual download.
 use crate::{app::MimirDesktop, core::worker::WorkResult, model::chat_key::ChatKey};
 use mimir::MimirError;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// CA §3.1 fields. `key`/`server` are present only on a group row whose upload finished.
+/// The attachment JSON fields. `key`/`server` are present only on a group row whose upload finished.
 #[derive(Deserialize, Default, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AttachmentMeta {
@@ -42,12 +42,12 @@ pub enum AttachmentKind {
     Image,
     File,
     Voice,
-    /// Any other `audio/*` file: a file bubble that plays inline (P3-R4).
+    /// Any other `audio/*` file: a file bubble that plays inline.
     Audio,
     Video,
 }
 
-/// P3-R4: voice is type 3 named "voice_message.m4a", or audio/mp4 with a .m4a name.
+/// Voice is type 3 named "voice_message.m4a", or audio/mp4 with a .m4a name.
 pub fn kind(msg_type: i32, m: &AttachmentMeta) -> AttachmentKind {
     let m4a = m.display_name().to_ascii_lowercase().ends_with(".m4a");
     match msg_type {
@@ -59,13 +59,13 @@ pub fn kind(msg_type: i32, m: &AttachmentMeta) -> AttachmentKind {
     }
 }
 
-/// `<files_dir>/<name>`; `None` for a name the core itself refuses (empty, `/`, `\`, `..`; CA §3.2).
+/// `<files_dir>/<name>`; `None` for a name the core itself refuses (empty, `/`, `\`, `..`).
 pub fn local_path(files_dir: &Path, m: &AttachmentMeta) -> Option<PathBuf> {
     let bad = m.name.is_empty() || m.name.contains(['/', '\\']) || m.name.contains("..");
     (!bad).then(|| files_dir.join(&m.name))
 }
 
-/// The attachment's bytes are on disk (the core's own test, CA §0.3).
+/// The attachment's bytes are on disk (the core's own test).
 pub fn is_present(files_dir: &Path, m: &AttachmentMeta) -> bool {
     local_path(files_dir, m).is_some_and(|p| p.is_file())
 }
@@ -79,20 +79,20 @@ pub enum Transfer {
     Uploading { done: i64, total: i64 },
 }
 
-/// Starts fetching the file of row `guid` in chat `key` (P3-R9, CA §8). The caller marks the row
+/// Starts fetching the file of row `guid` in chat `key`. The caller marks the row
 /// `Transfer::Downloading`; progress and completion arrive as file events, a failed start as
 /// `WorkResult::DownloadFailed` (which resets it to Idle).
 pub fn request_download(app: &MimirDesktop, key: ChatKey, guid: i64, m: &AttachmentMeta) {
     let Some(dest) = local_path(&app.paths.files_dir, m) else { return };
     match (key, m.key.is_some()) {
-        // Blocks for the whole transfer (CA §7): the group lane.
+        // Blocks for the whole transfer: the group lane.
         (ChatKey::Group(chat_id), true) => app.group_worker.submit(Box::new(move |core| {
             match core.download_group_file(chat_id, guid, dest.to_string_lossy().into_owned()) {
                 Ok(()) => WorkResult::Done,
                 Err(e) => WorkResult::DownloadFailed { guid, err: Some(e.to_string()) },
             }
         })),
-        // Android parity (AM §10): ask our other devices and the sender at once.
+        // Android parity: ask our other devices and the sender at once.
         (ChatKey::Contact(id), false) => {
             let (name, hash, size) = (m.name.clone(), m.hash.clone(), m.size);
             app.worker.submit(Box::new(move |core| {
@@ -102,7 +102,7 @@ pub fn request_download(app: &MimirDesktop, key: ChatKey, guid: i64, m: &Attachm
                     return sibling.map_or_else(|e| WorkResult::DownloadFailed { guid, err: Some(e.to_string()) }, |()| WorkResult::Done);
                 };
                 // ponytail: a peer that silently drops the request (file gone, hash mismatch) leaves the row Downloading
-                // until the user clicks it again (I6).
+                // until the user clicks it again.
                 match core.request_file(pubkey.clone(), guid, name, hash, size) {
                     Ok(()) => WorkResult::Done,
                     Err(MimirError::Connection(_)) => {
@@ -113,7 +113,7 @@ pub fn request_download(app: &MimirDesktop, key: ChatKey, guid: i64, m: &Attachm
                 }
             }));
         }
-        // A group row without a key (its upload failed, CA §9.1) cannot be fetched by anyone.
+        // A group row without a key (its upload failed) cannot be fetched by anyone.
         _ => {}
     }
 }
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn parse_1to1_and_group_meta() {
-        // CA §3.1, 1:1 form.
+        // 1:1 form.
         let one = r#"{"name":"Ab3dEf7hIj9kLm1n.jpg","originalName":"vacation.jpg","size":12345,"hash":"9f86d0","mimeType":"image/jpeg","text":"море"}"#.as_bytes();
         let want = AttachmentMeta {
             name: "Ab3dEf7hIj9kLm1n.jpg".into(), original_name: "vacation.jpg".into(), size: 12345, mime: "image/jpeg".into(),
@@ -213,7 +213,7 @@ mod tests {
             request_download(app, ChatKey::Group(7), 31, &group);
             assert!(matches!(next_work(&app.rx, Duration::from_secs(1)), WorkResult::DownloadFailed { guid: 31, err: Some(_) }));
             assert!(matches!(next_work(&app.rx, Duration::from_secs(3)), WorkResult::Done), "the busy job");
-            // A group row without a key (its upload failed, CA §9.1) has nothing to fetch.
+            // A group row without a key (its upload failed) has nothing to fetch.
             request_download(app, ChatKey::Group(7), 32, &one);
             assert!(app.rx.recv_timeout(Duration::from_millis(300)).is_err(), "no job");
         }

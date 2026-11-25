@@ -1,11 +1,11 @@
-//! Settings modal (Android SettingsActivity and its screens, AS §1): categories on the left, the selected one on
-//! the right (P4-R5: sub-dialogs are inline fields). Every change is saved to settings.json at once, and the values
+//! Settings modal (Android SettingsActivity and its screens): categories on the left, the selected one on
+//! the right (sub-dialogs are inline fields). Every change is saved to settings.json at once, and the values
 //! the core takes live are pushed to it (`apply_live`); Esc closes.
 mod advanced;
 mod files;
 mod general;
 
-pub use files::{listed as files_listed, FileRow};
+pub use files::{deleted as file_deleted, listed as files_listed, FileRow};
 
 use crate::{
     app::MimirDesktop,
@@ -40,7 +40,7 @@ impl Section {
         Section::Appearance, Section::Backup, Section::Files, Section::Advanced, Section::About,
     ];
 
-    /// The Android settings row title (AS §1.1); «Внешний вид» is ours.
+    /// The Android settings row title; «Внешний вид» is ours.
     pub fn title(self) -> Key {
         match self {
             Section::Receive => Key::ReceiveSettings,
@@ -96,9 +96,9 @@ pub struct SettingsUi {
     pub section: Section,
     /// The client priority field (Android's number dialog), applied on «Сохранить».
     pub priority: String,
-    /// The «Адрес узла:» field; `peer_invalid` after «Добавить» refused it.
+    /// The «Адрес узла:» field, and why «Добавить» refused it (shown in red under it).
     pub peer_input: String,
-    pub peer_invalid: bool,
+    pub peer_error: Option<Key>,
     /// The file server and call mediator key fields, applied on «Сохранить».
     pub file_server: String,
     pub call_mediator: String,
@@ -109,7 +109,7 @@ pub struct SettingsUi {
     pub job_failed: bool,
     /// The backup picked for import, waiting for the warning's «Импорт».
     pub import_path: Option<PathBuf>,
-    /// An import is staged and the app relaunches (P4-R1).
+    /// An import is staged and the app relaunches.
     pub restarting: bool,
     /// The Files section: the listing (`None` until it arrives; each opening of the section lists again), whether
     /// the worker is on it, and the file asked about deleting.
@@ -161,7 +161,7 @@ fn file_dialog(real: impl FnOnce() -> Option<PathBuf> + Send + 'static) -> Box<d
 fn export(app: &mut MimirDesktop) {
     app.state.settings_ui.job = Some((Job::Export, None));
     let name = backup::default_name();
-    let pick = file_dialog(move || rfd::FileDialog::new().set_file_name(name).add_filter("ZIP", &["zip"]).save_file());
+    let pick = file_dialog(move || crate::platform::file_dialog().set_file_name(name).add_filter("ZIP", &["zip"]).save_file());
     let (core, root, settings, worker) = (app.core.clone(), app.paths.root.clone(), app.settings.clone(), app.worker.clone());
     std::thread::spawn(move || {
         let result = match pick() {
@@ -186,9 +186,9 @@ pub fn backup_saved(app: &mut MimirDesktop, path: Option<&PathBuf>, err: Option<
 /// «Восстановление данных» (and the welcome screen's «Импортировать с телефона»): open dialog and validation off the UI
 /// thread; `backup_picked` takes it from there.
 pub fn pick_import(app: &mut MimirDesktop) {
-    // Busy while the dialog is open: one backup dialog at a time (M3).
+    // Busy while the dialog is open: one backup dialog at a time.
     app.state.settings_ui.job = Some((Job::Import, None));
-    let pick = file_dialog(|| rfd::FileDialog::new().add_filter("ZIP", &["zip"]).pick_file());
+    let pick = file_dialog(|| crate::platform::file_dialog().add_filter("ZIP", &["zip"]).pick_file());
     let worker = app.worker.clone();
     std::thread::spawn(move || {
         let path = pick();
@@ -198,7 +198,7 @@ pub fn pick_import(app: &mut MimirDesktop) {
 }
 
 /// A foreign or broken file is refused with Android's text. Android's warning asks first, unless the welcome screen
-/// shows over a database with nothing in it but Saved Messages (M2: a lost settings.json also brings the welcome back).
+/// shows over a database with nothing in it but Saved Messages (a lost settings.json also brings the welcome back).
 pub fn backup_picked(app: &mut MimirDesktop, path: Option<PathBuf>, valid: bool) {
     let has_data = || app.state.chats.iter().any(|r| r.key != ChatKey::SAVED) || app.core.get_contacts().iter().any(|c| c.id != SAVED_ID);
     let Some(path) = path else {
@@ -236,7 +236,7 @@ pub fn import_staged(app: &mut MimirDesktop, ctx: &egui::Context, err: Option<&S
     }
 }
 
-/// P4-R1: starts a new instance (same exe, args and environment) and quits this one for real (not to the tray); the new
+/// Starts a new instance (same exe, args and environment) and quits this one for real (not to the tray); the new
 /// one waits for our instance lock (`platform::RELAUNCHED`) and our files (`backup::finish_pending` retries its renames).
 /// ponytail: if the spawn fails the app still quits, and the import is applied at the next manual start.
 fn relaunch(app: &mut MimirDesktop, ctx: &egui::Context) {
@@ -582,7 +582,7 @@ mod tests {
         h.run_steps(2);
         run_until(&mut h, "the refusal", |h| h.query_all_by_label("Это не файл бэкапа Mimir!").next().is_some());
         assert!(h.state().state.settings_ui.job_failed && h.state().state.settings_ui.confirm.is_none());
-        // Our backup: Android's warning first, then it is staged and the app relaunches (P4-R1).
+        // Our backup: Android's warning first, then it is staged and the app relaunches.
         super::set_backup_picked(dest);
         h.get_by_label("Восстановление данных").click();
         h.run_steps(2);

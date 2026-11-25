@@ -1,4 +1,4 @@
-//! In-process audio playback (P3-R4, spec §9b: no ffmpeg). One thread owns the rodio output stream, which is `!Send`,
+//! In-process audio playback (no ffmpeg). One thread owns the rodio output stream, which is `!Send`,
 //! and at most one track; the UI sends it commands and reads a shared `PlayState`.
 use crate::{core::worker::{WorkResult, Worker}, i18n::{trf, Key, Lang}};
 use eframe::egui::Context;
@@ -53,7 +53,7 @@ pub struct Player {
 }
 
 impl Player {
-    /// Starts the player thread; the audio device is opened on the first play (and retried after a failure).
+    /// Starts the player thread; the audio device is opened for each new track.
     /// Playback errors reach the status line through `worker`.
     pub fn spawn(ctx: Context, worker: Worker, lang: Lang) -> Player {
         let (tx, rx) = mpsc::channel();
@@ -63,17 +63,18 @@ impl Player {
         std::thread::spawn(move || {
             #[cfg(not(test))]
             {
-                // ponytail: the stream is opened once and kept; if the device goes away (headphones unplugged), playback
-                // stays silent until the app restarts. Only a failed open is retried.
+                // Each new track opens the default output afresh, so a device that went away (headphones unplugged) or
+                // a new default device is picked up at the next ▶. The previous track is already stopped and dropped.
+                // ponytail: the track playing when its device goes stays silent until ▶ (rodio 0.20 reports no loss).
                 let mut out: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
                 run(rx, shared, lens, ctx, worker, lang, move |path| {
-                    if out.is_none() {
-                        out = Some(rodio::OutputStream::try_default().map_err(|e| e.to_string())?);
-                    }
-                    let sink = rodio::Sink::try_new(&out.as_ref().expect("opened above").1).map_err(|e| e.to_string())?;
+                    drop(out.take()); // one device open at a time
+                    let stream = rodio::OutputStream::try_default().map_err(|e| e.to_string())?;
+                    let sink = rodio::Sink::try_new(&stream.1).map_err(|e| e.to_string())?;
                     let sound = Decoded::open(path)?;
                     let len = sound.len_ms;
                     sink.append(sound);
+                    out.replace(stream); // kept open while the track plays
                     Ok((sink, len))
                 });
             }

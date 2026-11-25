@@ -13,7 +13,7 @@ pub enum ChatKey {
 impl ChatKey {
     pub const SAVED: ChatKey = ChatKey::Contact(SAVED_ID);
 
-    /// `chat_type` of the core's draft calls (CG §1j): 0 for a contact, 1 for a group.
+    /// `chat_type` of the core's draft calls: 0 for a contact, 1 for a group.
     pub fn draft_type(self) -> i32 {
         match self {
             ChatKey::Contact(_) => 0,

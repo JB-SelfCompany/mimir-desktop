@@ -5,7 +5,7 @@ pub mod notify;
 pub mod tray;
 
 pub use instance::{acquire, link_arg, Acquire, Instance, RELAUNCHED, RELAUNCH_WAIT};
-pub use tray::show_window;
+pub use tray::{file_dialog, show_window};
 
 use crate::{
     app::MimirDesktop,

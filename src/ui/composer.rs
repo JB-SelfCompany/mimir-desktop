@@ -25,7 +25,7 @@ pub struct Composer {
     want_focus: bool,
     /// Height of the input field last frame (it grows with the text).
     input_h: f32,
-    /// The file in the attachment panel; sent with the text as its caption (P3-R2).
+    /// The file in the attachment panel; sent with the text as its caption.
     pub attachment: Option<Staged>,
     /// Further picked or dropped files, sent right after `attachment` without a caption.
     pub more: Vec<Staged>,
@@ -183,7 +183,7 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
                 c.input_h = input_h;
                 ui.ctx().request_repaint(); // the bar is sized from this height; apply it now, not on the next input
             }
-            // AM §7: an empty composer with no attachment records voice; anything to send makes it the send button.
+            // An empty composer with no attachment records voice; anything to send makes it the send button.
             if c.text.trim().is_empty() && c.attachment.is_none() {
                 record_bar::mic(app, ui, BUTTON, p);
             } else {
@@ -217,7 +217,7 @@ fn send_composed(app: &mut MimirDesktop) {
     c.text.clear();
     c.attach_error = None;
     match c.attachment.take() {
-        // P3-R2: the text is the first file's caption; the other files follow without one.
+        // The text is the first file's caption; the other files follow without one.
         Some(first) => {
             let more = std::mem::take(&mut c.more);
             send_attachment(app, to.clone(), reply, text, first);
@@ -384,7 +384,7 @@ m")] {
 
     #[test] fn empty_composer_shows_mic_and_text_sends() {
         let mut h = open_saved();
-        assert!(h.query_by_label("Отправить").is_none(), "empty: the mic instead of send (AM §7)");
+        assert!(h.query_by_label("Отправить").is_none(), "empty: the mic instead of send");
         assert!(h.query_by_label("Записать голосовое сообщение").is_some());
         type_in(&mut h, "привет");
         h.get_by_label("Отправить").click();
@@ -621,7 +621,7 @@ m")] {
         wait_for_messages(&mut h, 1);
     }
 
-    // --- attachments (P3 Task 3) ---
+    // --- attachments ---
 
     #[derive(Debug)]
     struct Dropped(std::path::PathBuf);
@@ -687,7 +687,7 @@ m")] {
         assert_eq!((s.path, s.original_name.as_str(), s.mime.as_str(), s.msg_type, s.temp), (src, "отчёт.pdf", "application/pdf", 3, false));
         assert!(h.query_by_label("отчёт.pdf").is_some(), "the panel shows the name");
         assert!(h.query_by_label("8 Б").is_some(), "and the size");
-        assert!(h.state().state.open_chat.as_ref().unwrap().timeline.msgs.is_empty(), "picking does not send (AM §1)");
+        assert!(h.state().state.open_chat.as_ref().unwrap().timeline.msgs.is_empty(), "picking does not send");
     }
 
     #[test] fn drop_two_files_stages_first_then_sends_both() {

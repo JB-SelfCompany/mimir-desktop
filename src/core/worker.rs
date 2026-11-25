@@ -16,7 +16,8 @@ pub enum WorkResult {
     /// `accept_group_invite` succeeded; the chat is stored locally.
     InviteAccepted { chat_id: i64 },
     /// Result of looking a public group up by link; `None` once the retries ran out.
-    Preview(Option<mimir::ChannelInfo>),
+    /// `token`: the join dialog's lookup this answers.
+    Preview { token: u64, info: Option<mimir::ChannelInfo> },
     RequestAccepted { contact_id: i64 },
     RequestDeclined,
     Started,
@@ -28,34 +29,38 @@ pub enum WorkResult {
     Left { chat_id: i64 },
     /// The owner's `delete_group` succeeded (on the mediator and locally).
     GroupDeleted { chat_id: i64 },
+    /// `clear_group_chat_history` finished (rows and attachment files).
+    HistoryCleared { chat_id: i64 },
     /// `invite_to_group` succeeded; `name` is the invitee's.
     Invited { name: String },
     /// `update_account_avatar` stored our new avatar at `path` (relative to the core's data dir).
     AccountAvatar { path: String },
     /// `update_group_info` succeeded.
     GroupInfoUpdated { chat_id: i64 },
-    /// `change_member_role` to banned (P2-R4) succeeded for member `pubkey` of `chat_id`.
+    /// `change_member_role` to banned succeeded for member `pubkey` of `chat_id`.
     Banned { chat_id: i64, pubkey: Vec<u8>, name: String },
     /// `change_member_role` succeeded; `perms` is the member's new permission byte.
     RoleChanged { chat_id: i64, pubkey: Vec<u8>, perms: u8, name: String },
-    /// A manual download could not start (P3-R9); the row goes back to Idle. `None`: the contact is offline and
+    /// A manual download could not start; the row goes back to Idle. `None`: the contact is offline and
     /// is being re-dialled (not reported, as on Android).
     DownloadFailed { guid: i64, err: Option<String> },
-    /// An attachment send job of chat `chat` ended (P3 Task 3); `err` is the core's error, if any (a 1:1
+    /// An attachment send job of chat `chat` ended; `err` is the core's error, if any (a 1:1
     /// `Connection` error means queued).
     AttachmentSent { chat: ChatKey, err: Option<mimir::MimirError> },
-    /// `fix_corrupted_group_messages` ended (Advanced, AS §1.7).
+    /// `fix_corrupted_group_messages` ended (Advanced).
     Fixed { fixed: u32, scanned: u32 },
     /// «Удалить потерянные медиафайлы» removed `count` files of `bytes` in total.
     OrphansDeleted { count: usize, bytes: u64 },
-    /// A backup export ended (Plan 4 Task 5): `path` `None` = the save dialog was cancelled; `err` the failure.
+    /// A backup export ended: `path` `None` = the save dialog was cancelled; `err` the failure.
     BackupSaved { path: Option<std::path::PathBuf>, err: Option<String> },
     /// A backup file was picked for import (`path` `None`: the open dialog was cancelled); `valid`: `backup::validate` accepted it.
     BackupPicked { path: Option<std::path::PathBuf>, valid: bool },
     /// The picked backup was staged for the next start (`err` `None`), which the app now relaunches into.
     BackupStaged { err: Option<String> },
-    /// The Files section's listing (Plan 4 Task 4).
+    /// The Files section's listing.
     Files(Vec<crate::ui::settings::FileRow>),
+    /// The Files section deleted `storage_name` (`err`: why it could not).
+    FileDeleted { storage_name: String, err: Option<String> },
     Failed { what: &'static str, err: String },
     /// A failure already worded for the status line.
     Error(String),

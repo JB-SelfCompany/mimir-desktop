@@ -2,6 +2,7 @@
 //! groups in `group_info`.
 use crate::{
     app::MimirDesktop,
+    core::worker::WorkResult,
     i18n::{tr, Key, Lang},
     model::{chat_key::ChatKey, chat_list::{build_chat_list, SAVED_ID}, links::contact_link, timeline::Timeline},
     ui::{avatar::{self, avatar_color}, group_info, qr, theme::{danger_button, dialog_title, field_label, palette, primary_button, Palette}},
@@ -64,19 +65,15 @@ fn flags(app: &mut MimirDesktop, id: i64, pubkey: &[u8]) -> (bool, bool) {
 fn act(app: &mut MimirDesktop, a: Act) {
     let Some((id, pubkey, _)) = current(app) else { return };
     let (muted, blocked) = flags(app, id, &pubkey);
-    // ponytail: storage errors are ignored; the toggle just does not change.
     match a {
-        Act::Mute => {
-            if app.core.set_contact_muted(id, !muted).is_ok() {
-                app.state.contact_ui.flags = Some((id, !muted, blocked));
-            }
-        }
-        Act::Block => {
-            let r = if blocked { app.core.unblock_contact(pubkey) } else { app.core.block_contact(pubkey) };
-            if r.is_ok() {
-                app.state.contact_ui.flags = Some((id, muted, !blocked));
-            }
-        }
+        Act::Mute => match app.core.set_contact_muted(id, !muted) {
+            Ok(()) => app.state.contact_ui.flags = Some((id, !muted, blocked)),
+            Err(e) => failed(app, if muted { Key::Unmute } else { Key::Mute }, e),
+        },
+        Act::Block => match if blocked { app.core.unblock_contact(pubkey) } else { app.core.block_contact(pubkey) } {
+            Ok(()) => app.state.contact_ui.flags = Some((id, muted, !blocked)),
+            Err(e) => failed(app, if blocked { Key::Unblock } else { Key::Block }, e),
+        },
         Act::Rename => {
             // The stored name, not the key-prefix fallback the list shows (empty stays empty).
             let stored = app.core.get_contact(id).map(|c| c.name).unwrap_or_default();
@@ -85,6 +82,11 @@ fn act(app: &mut MimirDesktop, a: Act) {
         Act::Clear => app.state.contact_ui.dialog = Some(Dialog::Clear),
         Act::Remove => app.state.contact_ui.dialog = Some(Dialog::Remove),
     }
+}
+
+/// A storage call behind menu item `what` failed: said in the status line.
+fn failed(app: &mut MimirDesktop, what: Key, e: mimir::MimirError) {
+    app.error_text(format!("{}: {e}", tr(app.lang, what)));
 }
 
 /// The ⋮ menu of the chat header, a popup under the button `more`.
@@ -168,7 +170,7 @@ pub fn contents(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     let thumbs = &mut app.state.thumbs;
     let close_clicked = panel_frame(ui, p, lang, |ui| {
         ui.vertical_centered(|ui| {
-            // AM §9: 128 px, corner 8, in contact info.
+            // 128 px, corner 8, in contact info.
             avatar::show(ui, thumbs, path.as_deref(), avatar_color(&pubkey), 128., 4.);
             ui.label(RichText::new(&name).font(FontId::new(15., FontFamily::Name("bold".into()))).color(p.text));
         });
@@ -215,15 +217,23 @@ pub fn contents(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     }
 }
 
-/// Narrow windows: the panel floats over the chat at the right edge instead of taking its width.
+/// Narrow windows: the panel floats over the chat at the right edge, below its header, instead of taking its width.
+/// A click on the chat or the list closes it (not one on the header, whose name toggles it, nor on a dialog or menu).
 pub fn overlay(app: &mut MimirDesktop, ctx: &egui::Context, p: &Palette) {
     let screen = ctx.content_rect();
-    Area::new(Id::NULL.with("contact_info_overlay")).order(Order::Foreground).fixed_pos(screen.right_top() - vec2(WIDTH, 0.)).show(ctx, |ui| {
+    let top = screen.top() + crate::ui::chat_view::HEADER_H;
+    let area = Area::new(Id::NULL.with("contact_info_overlay")).order(Order::Foreground).fixed_pos(egui::pos2(screen.right() - WIDTH, top)).show(ctx, |ui| {
         Frame::popup(ui.style()).fill(p.list_bg).inner_margin(0).corner_radius(0).show(ui, |ui| {
-            ui.set_min_size(vec2(WIDTH, screen.height()));
+            ui.set_min_size(vec2(WIDTH, screen.bottom() - top));
             contents(app, ui, p);
         });
     });
+    let rect = area.response.rect;
+    let press = ctx.input(|i| i.pointer.interact_pos().filter(|_| i.pointer.any_pressed()));
+    // layer_id_at locks the context: not inside the input closure.
+    if press.is_some_and(|pos| pos.y > top && !rect.contains(pos) && ctx.layer_id_at(pos).is_none_or(|l| l.order == Order::Background)) {
+        app.state.info_open = false;
+    }
 }
 
 fn apply(app: &mut MimirDesktop, id: i64, d: Dialog) {
@@ -233,25 +243,32 @@ fn apply(app: &mut MimirDesktop, id: i64, d: Dialog) {
             let n = n.trim();
             // An unchanged name is not a local rename: that would stop the peer's own name from applying.
             if !n.is_empty() && n != stored.trim() {
-                let _ = app.core.rename_contact(id, n.to_string(), true);
+                if let Err(e) = app.core.rename_contact(id, n.to_string(), true) {
+                    failed(app, Key::Rename, e);
+                }
             }
         }
         Dialog::Clear => {
-            // ponytail: the attachment file names it returns are not unlinked; attachments arrive in Plan 3.
-            app.core.clear_contact_history(id);
+            let names = app.core.clear_contact_history(id);
+            let files_dir = app.paths.files_dir.clone();
+            app.worker.submit(Box::new(move |_| {
+                crate::media::remove_attachment_files(&files_dir, &names);
+                WorkResult::Done
+            }));
             if let Some(chat) = app.state.open_chat.as_mut().filter(|c| c.key == ChatKey::Contact(id)) {
                 chat.timeline = Timeline::open(&app.core, chat.key);
                 chat.reactions.clear();
                 chat.day_key = (usize::MAX, 0, 0);
             }
         }
-        Dialog::Remove => {
-            if app.core.remove_contact(id).is_ok() {
+        Dialog::Remove => match app.core.remove_contact(id) {
+            Ok(()) => {
                 app.state.selected = None;
                 app.state.open_chat = None;
                 app.state.info_open = false;
             }
-        }
+            Err(e) => failed(app, Key::RemoveContact, e),
+        },
     }
     app.state.chats = build_chat_list(&app.core, lang);
 }
@@ -298,6 +315,11 @@ pub fn dialogs(app: &mut MimirDesktop, ctx: &egui::Context) {
                 let e = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY)).labelled_by(l.id);
                 if ui.memory(|m| m.focused().is_none()) {
                     e.request_focus();
+                    // Typing replaces the old name (desktop rename convention; Android leaves the cursor at the end).
+                    if let Some(mut s) = egui::text_edit::TextEditState::load(ui.ctx(), e.id) {
+                        s.cursor.set_char_range(Some(egui::text::CCursorRange::select_all_str(name)));
+                        s.store(ui.ctx(), e.id);
+                    }
                 }
                 ok = e.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             }
@@ -420,6 +442,48 @@ mod tests {
     }
 
     #[test]
+    fn narrow_overlay_leaves_the_header_and_closes_on_a_chat_click() {
+        let (mut h, _) = contact_chat((900., 700.));
+        h.state_mut().state.info_open = true;
+        h.run();
+        let more = h.get_by_label("⋮").rect();
+        assert!(h.get_by_label("Публичный ключ").rect().top() > more.bottom(), "the overlay starts below the header");
+        h.get_by_label("⋮").click();
+        h.run();
+        assert!(h.query_by_label("Переименовать").is_some(), "⋮ is not covered");
+        h.key_press(eframe::egui::Key::Escape);
+        h.run();
+        assert!(h.state().state.info_open, "the menu closing leaves the panel");
+        // A press on the chat itself (left of the overlay, below the header).
+        let at = eframe::egui::pos2(900. - super::WIDTH - 40., 400.);
+        h.hover_at(at);
+        for pressed in [true, false] {
+            h.event(eframe::egui::Event::PointerButton { pos: at, button: eframe::egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.run();
+        }
+        assert!(!h.state().state.info_open);
+    }
+
+    #[test]
+    fn copy_buttons_copy_key_and_links() {
+        let (mut h, _) = contact_chat((1200., 800.));
+        h.state_mut().state.info_open = true;
+        h.run();
+        let copied = |h: &mut Harness<'static, MimirDesktop>, i: usize| {
+            h.get_all_by_label("Копировать").nth(i).unwrap().click();
+            h.step(); // the copy command is in this frame's output
+            h.output().platform_output.commands.iter().find_map(|c| match c {
+                eframe::egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+        };
+        let hex = "07".repeat(32);
+        assert_eq!(copied(&mut h, 0), Some(hex.clone()));
+        assert!(copied(&mut h, 1).is_some_and(|t| t.starts_with("mimir://") && t.contains(&hex)));
+        assert_eq!(copied(&mut h, 2), Some(format!("https://go.mimir.im/u/{hex}")));
+    }
+
+    #[test]
     fn saved_has_only_clear_history() {
         let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
         h.state_mut().state.selected = Some(ChatKey::SAVED);
@@ -458,13 +522,13 @@ mod tests {
         h.run();
         h.get_by_label("Переименовать").click();
         h.run();
-        h.get_by_label("Новое имя:").click();
+        assert!(h.get_by_label("Новое имя:").is_focused());
         h.get_by_label("Новое имя:").type_text("Боря");
         h.run();
         h.get_by_label("OK").click();
         h.run();
-        assert_eq!(h.state().core.get_contact(c).unwrap().name, "АняБоря");
-        assert!(h.state().state.chats.iter().any(|r| r.name == "АняБоря"));
+        assert_eq!(h.state().core.get_contact(c).unwrap().name, "Боря", "the selected old name is replaced");
+        assert!(h.state().state.chats.iter().any(|r| r.name == "Боря"));
     }
 
     #[test]
@@ -510,6 +574,23 @@ mod tests {
         h.run();
         assert!(h.query_by_label("hello").is_none());
         assert_eq!(h.state().state.selected, Some(ChatKey::Contact(c)));
+    }
+
+    #[test]
+    fn clear_history_deletes_attachment_files_and_posters() {
+        let (mut h, c) = contact_chat((1200., 700.));
+        let files = h.state().paths.files_dir.clone();
+        std::fs::create_dir_all(files.join(".thumbs")).unwrap();
+        let (file, poster) = (files.join("v.mp4"), files.join(".thumbs/v.mp4.jpg"));
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::write(&poster, b"x").unwrap();
+        h.state().core.add_local_message(c, 1, 0, true, true, 1_700_000_000_000, 0, 1, br#"{"name":"v.mp4"}"#.to_vec()).unwrap();
+        h.get_by_label("⋮").click();
+        h.run();
+        h.get_by_label("Очистить историю").click();
+        h.run();
+        h.get_by_label("OK").click();
+        crate::test_support::run_until(&mut h, "files deleted", |_| !file.exists() && !poster.exists());
     }
 
     #[test]

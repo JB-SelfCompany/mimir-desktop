@@ -1,4 +1,4 @@
-//! The client log (P4-R3): the core's tracing output (and `log` records) go to `<root>/logs/mimir.log`, which is
+//! The client log: the core's tracing output (and `log` records) go to `<root>/logs/mimir.log`, which is
 //! rotated once to `mimir.log.1` at startup when it has grown past 5 MiB. «Собрать логи» saves a copy of it.
 use std::{fs, path::{Path, PathBuf}, sync::Mutex};
 use tracing_subscriber::filter::LevelFilter;

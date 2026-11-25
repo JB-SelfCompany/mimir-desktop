@@ -1,4 +1,4 @@
-//! Full-window image viewer (AM §5 PictureActivity): the picture fitted to the window and «Сохранить»; Esc or a
+//! Full-window image viewer (Android PictureActivity): the picture fitted to the window and «Сохранить»; Esc or a
 //! click outside the picture closes it.
 use crate::{
     app::MimirDesktop,

@@ -1,4 +1,7 @@
-use crate::media::{avatar::{self, AvatarError, Picking}, thumbs::{Thumb, ThumbCache}};
+use crate::{
+    i18n::{tr, Key, Lang},
+    media::{avatar::{self, AvatarError, Picking}, thumbs::{Thumb, ThumbCache}},
+};
 use eframe::egui::epaint::{Mesh, Vertex, WHITE_UV};
 use eframe::egui::{
     vec2, Color32, Context, CursorIcon, Image, Painter, Pos2, Rect, Response, Role, Sense, Shape, Stroke, TextureHandle, TextureOptions, Ui,
@@ -63,7 +66,7 @@ pub fn paint_saved(painter: &Painter, rect: Rect, accent: Color32) {
     painter.add(Shape::closed_line(pts.to_vec(), eframe::egui::Stroke::new(2. * k.max(0.75), Color32::WHITE)));
 }
 
-/// An avatar in `rect` (AM §9: every place shows it square, corner `radius`): the picture at `path`, decoded off the
+/// An avatar in `rect` (every place shows it square, corner `radius`): the picture at `path`, decoded off the
 /// UI thread at the size drawn; the coloured placeholder while it loads, and for none or a missing or broken file.
 // ponytail: every visible avatar stats its file each frame (the cache's mtime check); fine for a screen of rows.
 pub fn paint(ui: &Ui, thumbs: &mut ThumbCache, rect: Rect, path: Option<&Path>, base: Color32, radius: f32) {
@@ -79,6 +82,14 @@ pub fn show(ui: &mut Ui, thumbs: &mut ThumbCache, path: Option<&Path>, base: Col
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     paint(ui, thumbs, rect, path, base, radius);
     resp
+}
+
+/// A group avatar that could not be used.
+pub fn error_text(e: AvatarError, lang: Lang) -> &'static str {
+    tr(lang, match e {
+        AvatarError::TooLarge => Key::AvatarTooLarge,
+        AvatarError::Unreadable => Key::ErrorLoadingImage,
+    })
 }
 
 /// A new avatar being picked in a dialog: the picker's answer, then the bytes to save and their preview.
@@ -177,7 +188,7 @@ mod tests {
         h.state_mut().state.chats = build_chat_list(&core, crate::i18n::Lang::Ru);
         h.state_mut().state.selected = Some(ChatKey::Contact(anya));
         h.state_mut().state.info_open = true;
-        // AM §9: list 48, chat toolbar 32, contact info 128.
+        // List 48, chat toolbar 32, contact info 128.
         run_until(&mut h, "the contact's avatars", |h| has(h, 48.) && has(h, 32.) && has(h, 128.));
         h.state_mut().state.selected = Some(ChatKey::Group(9));
         // Group info 128 and the members list 48 (Боб's, besides the two list rows).
@@ -186,7 +197,7 @@ mod tests {
 
     #[test]
     fn group_sender_avatar_beside_incoming_bubbles() {
-        // I4 / AM §9: a 48 px sender avatar left of each incoming group bubble; none for our own.
+        // A 48 px sender avatar left of each incoming group bubble; none for our own.
         let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
         let core = h.state().core.clone();
         let my = core.public_key();
@@ -208,7 +219,7 @@ mod tests {
 
     #[test]
     fn own_avatar_in_main_toolbar() {
-        // I4 / AM §9: the main toolbar shows our account avatar, 32/6.
+        // The main toolbar shows our account avatar, 32/6.
         let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
         h.state().core.update_account_avatar(1, png_bytes(64, 64, [200, 30, 30])).unwrap();
         h.state_mut().state.own_avatar = None; // read again, as at start-up (the harness drew a frame already)
@@ -230,7 +241,7 @@ mod tests {
         h.state_mut().state.chats = build_chat_list(&core, crate::i18n::Lang::Ru);
         run_until(&mut h, "the avatar", |h| has(h, 48.));
         let before = h.state().state.thumbs.square_texture(&path, 48).unwrap();
-        // The peer's new profile lands in the same file; its mtime may not change (no event says so, CA §6.2).
+        // The peer's new profile lands in the same file; its mtime may not change (no event says so).
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::fs::write(&path, png_bytes(64, 64, [30, 30, 200])).unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();

@@ -1,7 +1,7 @@
 //! Chat list rows (Android MainActivity.getChatList): Saved Messages first, then contacts and groups by last message time.
 use crate::i18n::{tr, Key, Lang};
 use crate::model::{chat_key::ChatKey, group::{self, group_to_stored, Members}, message::{decode, preview}};
-use mimir::{MimirApp, StoredGroupChat};
+use mimir::{MimirApp, StoredDraft, StoredGroupChat};
 
 pub const SAVED_ID: i64 = -100;
 
@@ -71,13 +71,29 @@ pub fn display_name(name: &str, pubkey: &[u8]) -> String {
     }
 }
 
+/// Android ContactsAdapter.buildDraftText: «Черновик: » then the text, with an attachment's kind before it (or
+/// instead of it when there is no text). A draft with neither is never stored: the core drops it on save.
+fn draft_preview(d: &StoredDraft, lang: Lang) -> String {
+    let text = d.text.as_deref().unwrap_or_default();
+    let media = d.media_uri.as_deref().is_some_and(|u| !u.is_empty());
+    let body = match (media, d.media_type, text.is_empty()) {
+        (true, 1, false) => format!("🖼️ {text}"),
+        (true, 3, false) => format!("📄 {text}"),
+        (true, 1, true) => format!("🖼️ {}", tr(lang, Key::Image)),
+        (true, 3, true) => format!("📄 {}", tr(lang, Key::DraftFile)),
+        (true, _, true) => tr(lang, Key::File).to_string(),
+        _ => text.to_string(),
+    };
+    format!("{}{body}", tr(lang, Key::Draft))
+}
+
 fn row(app: &MimirApp, lang: Lang, contact_id: i64, name: String, pubkey: Vec<u8>, avatar: String) -> ChatRow {
     let last = app.get_last_message(contact_id);
     let draft = app.get_draft(0, contact_id);
     // Android ContactsAdapter: draft > our pending/declined request > last message.
     let request = if contact_id == SAVED_ID { Request::None } else { Request::from_status(app.get_outgoing_request_status(pubkey.clone())) };
     let preview = match (&draft, &last, request.preview(lang)) {
-        (Some(d), _, _) => format!("{}{}", tr(lang, Key::Draft), d.text.as_deref().unwrap_or_default()),
+        (Some(d), _, _) => draft_preview(d, lang),
         (None, _, Some(r)) => r.to_string(),
         (None, Some(m), None) => preview(&decode(m.msg_type, m.data.as_deref()), lang),
         (None, None, None) => tr(lang, Key::EmptyChat).to_string(),
@@ -101,12 +117,12 @@ fn group_row(app: &MimirApp, lang: Lang, g: StoredGroupChat) -> ChatRow {
     let key = ChatKey::Group(g.chat_id);
     let draft = app.get_draft(key.draft_type(), g.chat_id);
     // The newest row a timeline shows (not a reaction or deletion notice); get_last_group_message would skip
-    // system rows, which preview as their text (P2-R2), never as raw bytes.
+    // system rows, which preview as their text, never as raw bytes.
     // ponytail: a newest page of only reactions falls back to get_last_group_message.
     let last = app.get_group_messages(g.chat_id, 0, 50).iter().map(group_to_stored).find(|m| !group::hidden(m.msg_type, m.data.as_deref()))
         .or_else(|| app.get_last_group_message(g.chat_id).filter(|m| !group::hidden(m.msg_type, m.data.as_deref())));
     let preview = match (&draft, last) {
-        (Some(d), _) => format!("{}{}", tr(lang, Key::Draft), d.text.as_deref().unwrap_or_default()),
+        (Some(d), _) => draft_preview(d, lang),
         (None, Some(m)) if m.msg_type == group::SYSTEM => {
             let mut members = Members::load(app, g.chat_id);
             members.learn(app, std::slice::from_ref(&m));
@@ -173,6 +189,21 @@ mod tests {
         let rows = build_chat_list(&app, Lang::Ru);
         assert_eq!(rows[1].preview, "Черновик: пишу…");
         assert!(rows[1].has_draft);
+    }
+    #[test] fn media_draft_previews_like_android() {
+        let (_t, app) = test_app();
+        let a = app.add_contact(vec![1;32], "Аня".into()).unwrap();
+        let preview = |text: Option<&str>, uri: Option<&str>, kind| {
+            app.save_draft(0, a, text.map(Into::into), uri.map(Into::into), kind).unwrap();
+            build_chat_list(&app, Lang::Ru)[1].preview.clone()
+        };
+        assert_eq!(preview(Some("смотри"), Some("content://x"), 1), "Черновик: 🖼️ смотри");
+        assert_eq!(preview(Some("вот"), Some("content://x"), 3), "Черновик: 📄 вот");
+        assert_eq!(preview(None, Some("content://x"), 1), "Черновик: 🖼️ Изображение");
+        assert_eq!(preview(Some(""), Some("content://x"), 3), "Черновик: 📄 Файл");
+        assert_eq!(preview(None, Some("content://x"), 4), "Черновик: Вложение");
+        assert_eq!(preview(Some("текст"), Some("content://x"), 4), "Черновик: текст");
+        assert_eq!(preview(Some(""), None, 0), "[ пустой чат ]", "the core drops a draft with nothing in it");
     }
     #[test] fn reaction_does_not_blank_preview() {
         let (_t, app) = test_app();

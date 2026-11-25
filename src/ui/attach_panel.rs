@@ -1,5 +1,5 @@
-//! The composer's attachment panel (AM §1) and where attachments come from: the 📎 picker, dropped files and a
-//! pasted picture (P3-R2). Staging runs on a thread of its own; the composer polls its result every frame.
+//! The composer's attachment panel and where attachments come from: the 📎 picker, dropped files and a
+//! pasted picture. Staging runs on a thread of its own; the composer polls its result every frame.
 use crate::{
     app::MimirDesktop,
     i18n::{tr, Key as K},
@@ -33,7 +33,7 @@ pub fn set_picked(paths: Vec<PathBuf>) {
 
 #[cfg(not(test))]
 fn picker() -> impl FnOnce() -> Option<Vec<PathBuf>> + Send {
-    || rfd::FileDialog::new().pick_files()
+    || crate::platform::file_dialog().pick_files()
 }
 
 #[cfg(test)]
@@ -96,7 +96,7 @@ pub fn take_input(app: &mut MimirDesktop, ctx: &Context) {
     }
 }
 
-/// The first good file goes in the panel, the rest wait behind it (sent after it, P3-R2); the first failure is shown.
+/// The first good file goes in the panel, the rest wait behind it (sent after it); the first failure is shown.
 fn apply(app: &mut MimirDesktop, batch: Batch) {
     let lang = app.lang;
     let (mut ok, mut error) = (vec![], None);

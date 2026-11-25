@@ -49,7 +49,7 @@ pub struct OpenChat {
     /// Contact public key (our own for Saved Messages); empty for a group.
     pub pubkey: Vec<u8>,
     pub timeline: Timeline,
-    /// Reaction chips per message guid, filled when the row is first drawn (Task 14 clears it on events).
+    /// Reaction chips per message guid, filled when the row is first drawn (cleared on events).
     pub reactions: HashMap<i64, Vec<(String, u32, bool)>>,
     pub menu: Option<Menu>,
     /// Contact's last_seen, read when the chat opens and on connect/disconnect events.
@@ -124,7 +124,7 @@ impl NetDots {
 }
 
 impl AppState {
-    /// Feeds a core event to the toolbar dots; the mediator dot is green while any mediator is connected (AG §1.1).
+    /// Feeds a core event to the toolbar dots; the mediator dot is green while any mediator is connected.
     pub fn apply_net(&mut self, e: &Event) {
         self.net.apply(e);
         match e {
@@ -188,7 +188,7 @@ pub struct AppState {
     /// Message id awaiting delete confirmation.
     pub confirm_delete: Option<i64>,
     pub forward: Option<ForwardDialog>,
-    /// True once the core is started (Task 14 sets it on WorkResult::Started); the composer sends nothing before.
+    /// True once the core is started (set on WorkResult::Started); the composer sends nothing before.
     pub core_started: bool,
     /// `MimirDesktop::apply_live` calls so far (tests: settings are re-applied after every start).
     pub live_applied: u32,
@@ -209,7 +209,7 @@ pub struct AppState {
     pub thumbs: crate::media::thumbs::ThumbCache,
     /// Full-window image viewer: (file, name to save it under), open while Some.
     pub viewer: Option<(std::path::PathBuf, String)>,
-    /// The ffmpeg found at startup (spec §9b); without it the mic is disabled and videos get no poster.
+    /// The ffmpeg found at startup; without it the mic is disabled and videos get no poster.
     pub ffmpeg: Option<std::path::PathBuf>,
     /// Video poster frames, made with `ffmpeg` off the UI thread.
     pub posters: crate::media::ffmpeg::Posters,

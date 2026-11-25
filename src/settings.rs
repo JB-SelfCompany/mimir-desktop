@@ -10,7 +10,7 @@ pub struct Settings {
     pub dark: Option<bool>,
     pub intro_done: bool,
     pub message_font: f32,
-    /// Per group, the newest ChatInfoChanged row already written into the local chat (P2-R7). Kept across restarts:
+    /// Per group, the newest ChatInfoChanged row already written into the local chat. Kept across restarts:
     /// re-applying an old rename would undo a newer one of our own, which the mediator does not echo back.
     pub chat_info_applied: HashMap<i64, i64>,
     pub media: MediaSettings,
@@ -22,7 +22,7 @@ pub struct Settings {
     pub peers: Vec<Peer>,
     /// Group call relay, 64 lowercase hex chars or empty (`call-mediator-pubkey`).
     pub call_mediator: String,
-    /// Keys of the last imported Android prefs file we do not use, written back on export (P4-R2).
+    /// Keys of the last imported Android prefs file we do not use, written back on export.
     pub android_extra: Vec<PrefEntry>,
 }
 
@@ -33,7 +33,7 @@ pub struct Peer {
     pub enabled: bool,
 }
 
-/// Android's message font sizes (AS §1.6).
+/// Android's message font sizes.
 pub const FONT_SIZES: [i64; 5] = [11, 13, 15, 18, 21];
 
 /// PeerProvider.DEFAULT_PEERS (the core keeps the same list), all enabled.
@@ -55,7 +55,7 @@ fn parse_peers(raw: &str, legacy_defaults: bool) -> Vec<Peer> {
     lines.iter().map(|l| Peer { url: l[1..].into(), enabled: l.starts_with('+') }).collect()
 }
 
-/// Media preferences (P3-R1), Android 3.3.7 defaults; edited in Plan 4's settings.
+/// Media preferences, Android 3.3.7 defaults; edited in the settings dialog.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct MediaSettings {
@@ -63,7 +63,7 @@ pub struct MediaSettings {
     pub image_format: u8,
     /// JPEG quality for re-encoded images (`images-quality`).
     pub image_quality: u8,
-    /// Auto-download caps in bytes: 0 = never, -1 = always (CA §1).
+    /// Auto-download caps in bytes: 0 = never, -1 = always.
     pub auto_contacts: i64,
     pub auto_others: i64,
     pub auto_groups: i64,
@@ -106,7 +106,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The Android-owned settings as `com.revertron.mimir_preferences.xml` entries (keys and types of AS §1, §2.1),
+    /// The Android-owned settings as `com.revertron.mimir_preferences.xml` entries,
     /// then the kept unknown ones.
     pub fn to_android_prefs(&self) -> Vec<PrefEntry> {
         use PrefValue::{Int, Str};
@@ -131,9 +131,9 @@ impl Settings {
         out.into_iter().map(|(name, value)| PrefEntry { name: name.into(), value }).chain(self.android_extra.iter().cloned()).collect()
     }
 
-    /// Takes an imported Android prefs file with Android's replace semantics (AS §2.2): every Android-owned field gets
+    /// Takes an imported Android prefs file with Android's replace semantics: every Android-owned field gets
     /// the file's value or, when missing or unreadable, its default. Out-of-range numbers are clamped (the font
-    /// snaps to the nearest size, ties to the larger); unknown keys are kept for export (P4-R2).
+    /// snaps to the nearest size, ties to the larger); unknown keys are kept for export.
     pub fn apply_android_prefs(&mut self, prefs: &[PrefEntry]) {
         let d = Settings::default();
         (self.media, self.block_strangers, self.priority, self.message_font) = (d.media, d.block_strangers, d.priority, d.message_font);
@@ -206,12 +206,12 @@ mod tests {
 
     #[test]
     fn media_defaults() {
-        // P3-R1: Android 3.3.7 defaults (AM §2, §4, §7; CA §1).
+        // Android 3.3.7 defaults.
         let m = Settings::default().media;
         assert_eq!((m.image_format, m.image_quality, m.voice_bitrate), (0, 95, 32000));
         assert_eq!((m.auto_contacts, m.auto_others, m.auto_groups), (10 << 20, 0, 10 << 20));
         assert_eq!(m.file_server, "0000128c1179f819faaa07fcada9f9803cb288bc68d278da82ca23d8b4b0ea9e");
-        // A settings.json from before Plan 3 (no "media") and a partial "media" both fill in the defaults.
+        // A settings.json from before the media settings existed (no "media") and a partial "media" both fill in the defaults.
         let old: Settings = serde_json::from_str(r#"{"intro_done":true}"#).unwrap();
         assert_eq!(old.media, m);
         let partial: Settings = serde_json::from_str(r#"{"media":{"voice_bitrate":128000}}"#).unwrap();
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(peers.lines().count(), 10);
         assert!(peers.lines().all(|l| l.starts_with('+')), "{peers}");
         assert_eq!(get(&p, "call-mediator-pubkey"), None, "no key while empty");
-        // A settings.json from before Plan 4 gets the Android defaults for the new fields.
+        // A settings.json from before the Android-owned settings gets the Android defaults for the new fields.
         let old: Settings = serde_json::from_str(r#"{"intro_done":true}"#).unwrap();
         assert_eq!(old, Settings { intro_done: true, ..Default::default() });
         assert_eq!((old.block_strangers, old.priority, old.peers.len(), old.call_mediator.as_str()), (false, 1, 10, ""));
@@ -276,7 +276,7 @@ mod tests {
         let mut again = Settings::default();
         again.apply_android_prefs(&parse_prefs(&write_prefs(&out)));
         assert_eq!(again, st);
-        // Replace semantics (AS §2.2): keys missing from the file go back to their defaults.
+        // Replace semantics: keys missing from the file go back to their defaults.
         st.apply_android_prefs(&[]);
         assert_eq!(st, Settings::default());
     }

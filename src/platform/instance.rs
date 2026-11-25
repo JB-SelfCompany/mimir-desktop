@@ -11,6 +11,8 @@ use std::{
 
 const LOCK: &str = ".instance.lock";
 const PORT: &str = ".instance.port";
+/// The primary's first line on each connection: a stale port file may name some other local service by now.
+const HELLO: &str = "mimir-desktop";
 
 /// Set in the environment of the process a backup import relaunches.
 pub const RELAUNCHED: &str = "MIMIR_RELAUNCHED";
@@ -37,6 +39,7 @@ impl Instance {
             let _lock = lock;
             for stream in listener.incoming().flatten() {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = writeln!(&stream, "{HELLO}");
                 let mut line = String::new();
                 // A link is short: a stray client cannot make us buffer more.
                 if BufReader::new(stream.take(4096)).read_line(&mut line).is_ok_and(|n| n > 0) {
@@ -68,7 +71,7 @@ fn try_acquire(root: &Path, link: Option<&str>, wait: Duration) -> io::Result<Ac
             }
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
             Err(TryLockError::WouldBlock) => {
-                forward(root, link.unwrap_or(""));
+                forward(root, link.unwrap_or(""), 30);
                 return Ok(Acquire::Forwarded);
             }
             Err(TryLockError::Error(e)) => return Err(e),
@@ -76,18 +79,26 @@ fn try_acquire(root: &Path, link: Option<&str>, wait: Duration) -> io::Result<Ac
     }
 }
 
-/// The primary may still be between taking the lock and writing its port: retried for about 3 s.
-fn forward(root: &Path, line: &str) {
-    for _ in 0..30 {
+/// The primary may still be between taking the lock and writing its port (the file then names a crashed run's port):
+/// `tries` times, 100 ms apart. Whether the line reached a Mimir instance.
+fn forward(root: &Path, line: &str, tries: u32) -> bool {
+    for _ in 0..tries {
         let port = fs::read_to_string(root.join(PORT)).ok().and_then(|p| p.trim().parse::<u16>().ok());
-        if let Some(mut s) = port.and_then(|p| TcpStream::connect((Ipv4Addr::LOCALHOST, p)).ok()) {
-            if writeln!(s, "{line}").is_ok() {
-                return;
-            }
+        if port.and_then(|p| TcpStream::connect((Ipv4Addr::LOCALHOST, p)).ok()).is_some_and(|s| send_to_mimir(s, line)) {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     tracing::warn!("could not reach the running Mimir instance; link dropped");
+    false
+}
+
+/// Sends `line` once the listener has greeted with `HELLO`: nothing goes to a service that is not Mimir.
+fn send_to_mimir(mut s: TcpStream, line: &str) -> bool {
+    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut hello = String::new();
+    let greeted = BufReader::new((&s).take(64)).read_line(&mut hello).is_ok() && hello.trim_end() == HELLO;
+    greeted && writeln!(s, "{line}").is_ok()
 }
 
 /// The first argument that is a Mimir link (`mimir://…` or `https://go.mimir.im/…`).
@@ -135,6 +146,25 @@ mod tests {
         });
         assert!(matches!(acquire(tmp.path(), None, RELAUNCH_WAIT), Acquire::Primary(_)), "the relaunch takes over");
         quit.join().unwrap();
+    }
+
+    #[test]
+    fn stale_port_of_another_service_gets_no_link() {
+        // The file names a port some other local service took after a crash; it answers, but not as Mimir.
+        let tmp = tempfile::tempdir().unwrap();
+        let other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        fs::write(tmp.path().join(PORT), other.local_addr().unwrap().port().to_string()).unwrap();
+        let service = std::thread::spawn(move || {
+            let mut got = vec![];
+            for mut s in other.incoming().take(3).flatten() {
+                s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").unwrap();
+                s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let _ = s.read_to_end(&mut got);
+            }
+            got
+        });
+        assert!(!forward(tmp.path(), "mimir://mm/u/ab", 3));
+        assert!(service.join().unwrap().is_empty(), "the link went nowhere");
     }
 
     #[test]

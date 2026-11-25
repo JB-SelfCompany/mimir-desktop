@@ -1,5 +1,5 @@
-//! The external ffmpeg (spec §9b): looked for next to the executable, then on PATH; never bundled. It encodes voice
-//! messages (LM §3) and makes video posters (LM §5). Every call blocks: run them off the UI thread.
+//! The external ffmpeg: looked for next to the executable, then on PATH; never bundled. It encodes voice
+//! messages and makes video posters. Every call blocks: run them off the UI thread.
 use eframe::egui::Context;
 use std::{
     collections::HashMap,
@@ -41,7 +41,7 @@ pub fn command(bin: &Path) -> Command {
     cmd
 }
 
-/// LM §3: raw f32 PCM on stdin to AAC-LC 44.1 kHz mono in MP4 (the voice wire format, AM §7).
+/// Raw f32 PCM on stdin to AAC-LC 44.1 kHz mono in MP4 (the voice wire format).
 fn voice_args(rate: u32, channels: u16, bitrate: u32, out: &Path) -> Vec<OsString> {
     let (rate, channels, bitrate) = (rate.to_string(), channels.to_string(), bitrate.to_string());
     let mut args: Vec<OsString> = ["-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", &rate, "-ac", &channels, "-i", "pipe:0"]
@@ -60,7 +60,7 @@ pub fn encode_voice(bin: &Path, pcm: &[f32], rate: u32, channels: u16, bitrate: 
         let mut child = command(bin).args(voice_args(rate, channels, bitrate, out)).stdin(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
         let mut stdin = child.stdin.take().expect("piped stdin");
         let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-        // Written from a thread of its own while stderr is read here, so neither pipe can stall the other (LM §3).
+        // Written from a thread of its own while stderr is read here, so neither pipe can stall the other.
         // A failed write means ffmpeg quit early, which its exit status reports; dropping stdin is the end of input.
         let writer = std::thread::spawn(move || drop(stdin.write_all(&bytes)));
         let output = child.wait_with_output().map_err(|e| e.to_string())?;
@@ -70,7 +70,7 @@ pub fn encode_voice(bin: &Path, pcm: &[f32], rate: u32, channels: u16, bitrate: 
     run().inspect_err(|_| drop(std::fs::remove_file(out)))
 }
 
-/// The first frame of \`video\` as \`out_jpg\`, and the clip's duration in ms when ffmpeg reports one (LM §5).
+/// The first frame of \`video\` as \`out_jpg\`, and the clip's duration in ms when ffmpeg reports one.
 pub fn video_poster(bin: &Path, video: &Path, out_jpg: &Path) -> Result<Option<u64>, String> {
     let output = command(bin)
         .args(["-hide_banner", "-y", "-i"])
@@ -112,7 +112,7 @@ pub enum Poster {
 type Job = (PathBuf, PathBuf, Option<PathBuf>);
 type Lane = (Sender<Job>, Receiver<(PathBuf, Poster)>);
 
-/// Video posters (P3-R6), cached as \`<dir>/<video file name>.jpg\` with the duration in a \`.dur\` file beside it.
+/// Video posters, cached as \`<dir>/<video file name>.jpg\` with the duration in a \`.dur\` file beside it.
 // ponytail: one ffmpeg at a time on one thread; a chat full of new videos fills in one tile after another.
 #[derive(Default)]
 pub struct Posters {

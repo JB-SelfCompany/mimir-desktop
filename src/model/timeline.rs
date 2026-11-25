@@ -122,10 +122,10 @@ impl Timeline {
     }
 }
 
-/// Renders only the visible rows; Task 9 supplies the bubble row.
+/// Renders only the visible rows; the caller supplies the bubble row.
 /// load_older fires once per arrival at the top (re-armed after scrolling away); the scroll offset is
-/// then shifted by the new rows' heights so the reader keeps their place.
-// ponytail: if the loaded rows fit entirely in the viewport (very tall window) older pages never load.
+/// then shifted by the new rows' heights so the reader keeps their place. Rows that fit the viewport (a very tall
+/// window) cannot be scrolled up to arm it, so older pages load until they fill it.
 pub fn show_timeline(
     ui: &mut egui::Ui,
     t: &mut Timeline,
@@ -162,7 +162,7 @@ pub fn show_timeline(
     if let Some(pad) = t.settle.take() {
         t.pending_offset = Some(pad);
         ui.ctx().request_repaint();
-    } else if offset <= 0.0 && t.armed && t.has_more {
+    } else if offset <= 0.0 && (t.armed || out.content_size.y <= out.inner_rect.height()) && t.has_more {
         let before = t.msgs.len();
         load_older(t);
         let added = t.msgs.len().saturating_sub(before);
@@ -330,6 +330,16 @@ mod tests {
         let ys = h.state().ys.borrow();
         let top = ys.values().copied().fold(f32::MAX, f32::min);
         assert!((ys[&anchor] - top).abs() <= 1.0, "anchor y {} but topmost row y {top}", ys[&anchor]);
+    }
+
+    #[test] fn tall_window_loads_older_until_filled() {
+        let (_tmp, mut h) = view(200);
+        h.set_size(egui::vec2(400., 3000.)); // more than a page of rows fits
+        for _ in 0..40 { h.step(); }
+        let t = &h.state().t;
+        let rows: f32 = t.heights.iter().sum();
+        assert!(t.msgs.len() > 50, "older pages loaded: {}", t.msgs.len());
+        assert!(rows > 3000. || !t.has_more, "loaded until the rows fill the view ({rows} px) or history ends");
     }
 
     #[test] fn at_bottom_tracks_scroll_position() {

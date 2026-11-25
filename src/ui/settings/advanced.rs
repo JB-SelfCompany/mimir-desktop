@@ -1,4 +1,4 @@
-//! The Advanced section (AS §1.7): peers, mediators, the two maintenance jobs, file server and call mediator keys,
+//! The Advanced section: peers, mediators, the two maintenance jobs, file server and call mediator keys,
 //! «Собрать логи» and «Закрыть Мимир». The jobs run on the worker; progress and result show under their row.
 use super::{commit, row_title, save, Confirm, Job};
 use crate::{
@@ -34,7 +34,7 @@ fn is_hex_key(key: &str) -> bool {
 }
 
 /// Regular files directly in `files_dir` that no message names as its attachment (`files::referenced`: images, files, voice and video), as Android's
-/// cleaner finds them (AS §3.4); `.thumbs/` (a directory) and staged sends (`mimir_staged_*`) are skipped (P4-R4).
+/// cleaner finds them; `.thumbs/` (a directory) and staged sends (`mimir_staged_*`) are skipped.
 pub fn orphans(core: &MimirApp, files_dir: &Path) -> Vec<PathBuf> {
     let known = super::files::referenced(core);
     let Ok(dir) = fs::read_dir(files_dir) else { return vec![] };
@@ -149,19 +149,23 @@ fn peers(app: &mut MimirDesktop, ui: &mut egui::Ui, p: &Palette) {
         add = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         add |= ui.add(primary_button(p, tr(lang, Key::AddButton))).clicked();
     });
-    if s.peer_invalid {
-        // The format hint, in red, says what is expected.
-        ui.label(RichText::new(tr(lang, Key::PeerUrlHint)).size(12.).color(p.danger));
+    if let Some(key) = s.peer_error {
+        // A bad URL gets the format hint, in red: it says what is expected.
+        ui.label(RichText::new(tr(lang, key)).size(12.).color(p.danger));
     }
     if add {
         let url = s.peer_input.trim().to_string();
-        s.peer_invalid = !valid_peer(&url);
-        if !s.peer_invalid {
+        s.peer_error = if !valid_peer(&url) {
+            Some(Key::PeerUrlHint)
+        } else if app.settings.peers.iter().any(|p| p.url == url) {
+            Some(Key::PeerExists)
+        } else {
+            None
+        };
+        if s.peer_error.is_none() {
             s.peer_input.clear();
-            if !app.settings.peers.iter().any(|p| p.url == url) {
-                app.settings.peers.push(Peer { url, enabled: true });
-                changed = true;
-            }
+            app.settings.peers.push(Peer { url, enabled: true });
+            changed = true;
         }
     }
     if let Some(i) = remove {
@@ -226,7 +230,7 @@ pub fn advanced(app: &mut MimirDesktop, ui: &mut egui::Ui) {
     }
 }
 
-/// The confirmation over the settings modal: deleting orphans (ours, P4-R4: title and text are the row's), exiting or
+/// The confirmation over the settings modal: deleting orphans (ours: title and text are the row's), exiting or
 /// importing a backup (Android's). Exit quits for real, past the tray.
 pub fn confirm(app: &mut MimirDesktop, ctx: &egui::Context, which: Confirm) {
     let lang = app.lang;
@@ -346,6 +350,20 @@ mod tests {
         assert_eq!(saved(&h).peers.len(), 3);
         assert!(h.state().state.settings_ui.peer_input.is_empty());
         assert!(h.query_by_label("tcp://1.2.3.4:1234 или tls://example.com:443").is_none());
+    }
+
+    #[test]
+    fn duplicate_peer_says_so() {
+        let mut h = opened();
+        h.state_mut().state.settings_ui.peer_input = "tcp://a:1".into();
+        click(&mut h, "Добавить");
+        assert_eq!(h.state().settings.peers.len(), 2, "not added twice");
+        assert_eq!(h.state().state.settings_ui.peer_input, "tcp://a:1", "kept, not silently cleared");
+        assert!(h.query_by_label("Этот узел уже есть в списке").is_some());
+        h.state_mut().state.settings_ui.peer_input = "tcp://c:3".into();
+        click(&mut h, "Добавить");
+        assert_eq!(h.state().settings.peers.len(), 3);
+        assert!(h.query_by_label("Этот узел уже есть в списке").is_none(), "cleared by the next good add");
     }
 
     fn save_nth(h: &mut H, n: usize) {

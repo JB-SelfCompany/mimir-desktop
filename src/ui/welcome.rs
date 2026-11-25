@@ -15,16 +15,16 @@ pub fn rune(ui: &mut egui::Ui, p: &Palette) {
     g.line_segment([Pos2::new(r, rect.top()), Pos2::new(l, mid)], s);
 }
 
-/// The startup screen while `backup::restore` runs (I2): the rune, a spinner and `text`; with `close` (another
-/// instance restoring) a «Закрыть» button instead of the spinner, true once clicked.
-pub fn progress(ui: &mut egui::Ui, lang: Lang, p: &Palette, text: Key, close: bool) -> bool {
+/// The startup screen while `backup::restore` runs: the rune, a spinner and `text`; with `close` (another
+/// instance restoring, or the old data could not be put back) a «Закрыть» button instead of the spinner, true once clicked.
+pub fn progress(ui: &mut egui::Ui, lang: Lang, p: &Palette, text: &str, close: bool) -> bool {
     let mut clicked = false;
     CentralPanel::default().frame(Frame::NONE.fill(p.list_bg)).show(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() - 200.).max(0.) / 2.);
             rune(ui, p);
             ui.add_space(24.);
-            ui.label(RichText::new(tr(lang, text)).size(16.).color(p.text));
+            ui.label(RichText::new(text).size(16.).color(p.text));
             ui.add_space(16.);
             if close {
                 clicked = ui.add(crate::ui::theme::primary_button(p, tr(lang, Key::Close))).clicked();

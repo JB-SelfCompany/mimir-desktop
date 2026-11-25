@@ -3,15 +3,14 @@
 //! open (spinner, no buttons) until the result comes back.
 use crate::{
     app::MimirDesktop,
-    core::worker::WorkResult,
     i18n::{tr, Key},
     media::avatar::GROUP_MAX,
-    ui::{avatar::pick_button, group_info::avatar_error, theme::{dialog, dialog_title, field_label, palette, primary_button}},
+    ui::{avatar::{self, pick_button}, theme::{dialog, dialog_title, field_label, palette, primary_button}},
 };
 use eframe::egui::{self, Align, Color32, ComboBox, Id, Layout, RichText, Spinner, TextEdit};
 use mimir::StoredMediator;
 
-/// Android `MAX_NAME_LENGTH` / `MAX_DESCRIPTION_LENGTH` (AG §1.2), counted in characters.
+/// Android `MAX_NAME_LENGTH` / `MAX_DESCRIPTION_LENGTH`, counted in characters.
 pub(crate) const MAX_NAME: usize = 25;
 pub(crate) const MAX_DESCRIPTION: usize = 200;
 
@@ -27,7 +26,7 @@ pub struct NewGroupDialog {
     /// True while the worker creates the group.
     pub busy: bool,
     pub error: Option<String>,
-    /// The picked avatar (AM §9: ≤ 200 KiB), sent with `create_group`.
+    /// The picked avatar (≤ 200 KiB), sent with `create_group`.
     pub avatar: crate::ui::avatar::AvatarPick,
     /// The avatar handed to the last `create_group` job, for the tests.
     #[cfg(test)]
@@ -40,7 +39,7 @@ pub fn open(app: &mut MimirDesktop) {
     app.state.new_group = Some(NewGroupDialog { mediators, mediator: default, ..Default::default() });
 }
 
-/// Mediator name, or the first 8 hex digits of its key (AG §1.2).
+/// Mediator name, or the first 8 hex digits of its key.
 fn picker_label(m: &StoredMediator) -> String {
     if m.name.trim().is_empty() { hex::encode_upper(&m.pubkey).chars().take(8).collect() } else { m.name.clone() }
 }
@@ -61,10 +60,14 @@ fn submit(app: &mut MimirDesktop) {
     {
         d.submitted_avatar = avatar.clone();
     }
+    // Tests do not run the job: create_group dials and mines, and an unreachable mediator holds the worker for seconds.
+    #[cfg(not(test))]
     app.group_worker.submit(Box::new(move |core| match core.create_group(mediator, name, description, avatar, public) {
-        Ok(chat_id) => WorkResult::GroupCreated { chat_id },
-        Err(e) => WorkResult::Failed { what: "create_group", err: e.to_string() },
+        Ok(chat_id) => crate::core::worker::WorkResult::GroupCreated { chat_id },
+        Err(e) => crate::core::worker::WorkResult::Failed { what: "create_group", err: e.to_string() },
     }));
+    #[cfg(test)]
+    let _ = (mediator, name, description, public);
 }
 
 /// A text field with its «N/max» counter under it; true when the text was edited this frame.
@@ -82,7 +85,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
     let (lang, started) = (app.lang, app.state.core_started);
     if let Some(d) = app.state.new_group.as_mut() {
         if let Some(e) = d.avatar.poll(ctx) {
-            d.error = Some(avatar_error(e, lang).to_string());
+            d.error = Some(avatar::error_text(e, lang).to_string());
         }
     }
     let (mut go, mut cancel) = (false, false);
@@ -92,7 +95,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         let Some(d) = app.state.new_group.as_mut() else { return };
         dialog_title(ui, tr(lang, Key::CreateNewGroup));
         ui.add_enabled_ui(!d.busy, |ui| {
-            // AM §9: the group avatar (≤ 200 KiB), 128 px; no chat id to colour the placeholder yet, so Android's grey.
+            // The group avatar (≤ 200 KiB), 128 px; no chat id to colour the placeholder yet, so Android's grey.
             ui.vertical_centered(|ui| {
                 if pick_button(ui, &mut app.state.thumbs, &d.avatar, None, Color32::from_gray(0xC8), 128., tr(lang, Key::ChangeAvatar)) {
                     d.avatar.start(ui.ctx(), tr(lang, Key::Image), GROUP_MAX);

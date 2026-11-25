@@ -80,10 +80,21 @@ pub(crate) fn show_from_tray(tx: &Sender<Event>, ctx: &egui::Context) {
 }
 
 pub fn show_window(ctx: &egui::Context) {
-    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-    ctx.send_viewport_cmd(ViewportCommand::Focus);
+    for c in show_commands(WAYLAND.load(Ordering::Relaxed)) {
+        ctx.send_viewport_cmd(c);
+    }
     raise_native();
+}
+
+/// What brings the window back. On Wayland winit can neither unminimize nor focus a window (the close only minimized
+/// it there); a request for attention goes through xdg-activation, which compositors may honour by raising the window.
+// ponytail: some only flash it or notify instead (GNOME: «Mimir is ready»); the user then clicks it.
+fn show_commands(wayland: bool) -> Vec<ViewportCommand> {
+    let mut c = vec![ViewportCommand::Visible(true), ViewportCommand::Minimized(false), ViewportCommand::Focus];
+    if wayland {
+        c.push(ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+    }
+    c
 }
 
 /// The window close (title bar, Alt+F4) hides it while the tray is up; quitting (tray Exit, settings Exit) lets it go.
@@ -113,6 +124,37 @@ pub fn remember_window(cc: &eframe::CreationContext<'_>) {
         Ok(RawWindowHandle::Win32(w)) => HWND.store(w.hwnd.get(), Ordering::Relaxed),
         Ok(RawWindowHandle::Wayland(_)) => WAYLAND.store(true, Ordering::Relaxed),
         _ => {}
+    }
+}
+
+/// A file dialog owned by the main window: on Windows it stays above the window and is modal to it.
+// ponytail: elsewhere the dialog has no parent (it may open behind the window).
+pub fn file_dialog() -> rfd::FileDialog {
+    let dialog = rfd::FileDialog::new();
+    #[cfg(windows)]
+    if let Some(hwnd) = std::num::NonZeroIsize::new(HWND.load(Ordering::Relaxed)) {
+        return dialog.set_parent(&MainWindow(hwnd));
+    }
+    dialog
+}
+
+/// The main window's HWND as rfd's `set_parent` takes it.
+#[cfg(windows)]
+struct MainWindow(std::num::NonZeroIsize);
+
+#[cfg(windows)]
+impl raw_window_handle::HasWindowHandle for MainWindow {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let raw = raw_window_handle::RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(self.0));
+        // SAFETY: the main window lives as long as the process; rfd only reads the HWND out of it.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+    }
+}
+
+#[cfg(windows)]
+impl raw_window_handle::HasDisplayHandle for MainWindow {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(raw_window_handle::DisplayHandle::windows())
     }
 }
 
@@ -233,6 +275,13 @@ mod tests {
         tx.send(Event::External(Ext::Show)).unwrap();
         h.step();
         assert!(focus(&h).focused, "shown again");
+    }
+
+    #[test]
+    fn wayland_show_asks_for_activation() {
+        let attention = ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical);
+        assert!(show_commands(true).contains(&attention) && show_commands(true).contains(&ViewportCommand::Focus));
+        assert!(!show_commands(false).contains(&attention), "elsewhere Visible/Focus raise it");
     }
 
     #[test]

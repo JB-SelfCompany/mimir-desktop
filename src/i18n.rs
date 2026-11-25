@@ -18,6 +18,8 @@ pub enum Key {
     SavedMessages,
     EmptyChat,
     Draft,
+    /// A draft's attached file (Android draft_file; «Вложение» is `File`).
+    DraftFile,
     VoiceMessage,
     Unsupported,
     Image,
@@ -38,7 +40,7 @@ pub enum Key {
     Yesterday,
     Reply,
     Copy,
-    /// The mediator row menu's copy item (AG §3 `menu_copy`).
+    /// The mediator row menu's copy item (Android `menu_copy`).
     MenuCopy,
     Forward,
     Delete,
@@ -238,7 +240,7 @@ pub enum Key {
     ErrorLoadingImage,
     ErrorLoadingAvatarPicture,
     ChangeAvatar,
-    // Settings (AS §1; Android strings.xml verbatim).
+    // Settings (Android strings.xml verbatim).
     Settings,
     ReceiveSettings,
     ContactRequestsFrom,
@@ -300,6 +302,7 @@ pub enum Key {
     BackupExportFailed,
     BackupImportSuccess,
     BackupImportFailed,
+    DataNotRestored,
     BackupInvalidFile,
     BackupImportWarningTitle,
     BackupImportWarningMessage,
@@ -318,6 +321,7 @@ pub enum Key {
     ConfigurePeersDesc,
     PeerUrl,
     PeerUrlHint,
+    PeerExists,
     FixCorrupted,
     FixCorruptedDesc,
     MessagesFixed,
@@ -365,6 +369,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::EmptyChat, Lang::En) => "[ empty chat ]",
         (Key::Draft, Lang::Ru) => "Черновик: ",
         (Key::Draft, Lang::En) => "Draft: ",
+        (Key::DraftFile, Lang::Ru) => "Файл",
+        (Key::DraftFile, Lang::En) => "File",
         (Key::VoiceMessage, Lang::Ru) => "🎤 Голосовое сообщение",
         (Key::VoiceMessage, Lang::En) => "🎤 Voice message",
         (Key::Unsupported, Lang::Ru) => "Неподдерживаемое сообщение — обновите Mimir",
@@ -768,20 +774,20 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::SendFile, Lang::En) => "File",
         (Key::FileTooLargeMax, Lang::Ru) => "Файл слишком большой. Максимальный размер 1024 МБ.",
         (Key::FileTooLargeMax, Lang::En) => "File is too large. Maximum size is 1024 MB.",
-        // Android's ru says «50Мб» (AM §12.D); the limit is 500 MB.
+        // Android's ru says «50Мб»; the limit is 500 MB.
         (Key::GroupFileTooLarge, Lang::Ru) => "Файл слишком велик для группового чата. Максимальный размер 500 МБ.",
         (Key::GroupFileTooLarge, Lang::En) => "File is too large for group chat. Maximum size is 500 MB.",
-        // Not in Android (it only logs staging failures, AM §12.F).
+        // Not in Android (it only logs staging failures).
         (Key::CannotReadFile, Lang::Ru) => "Не удалось прочитать файл",
         (Key::CannotReadFile, Lang::En) => "Could not read the file",
         (Key::NotAFile, Lang::Ru) => "Можно отправить только файл, не папку",
         (Key::NotAFile, Lang::En) => "Only files can be sent, not folders",
         (Key::SendFileFailed, Lang::Ru) => "Не удалось отправить файл: %s",
         (Key::SendFileFailed, Lang::En) => "Could not send the file: %s",
-        // AM too_big_picture_resizing, Android's English kept as is.
+        // Android too_big_picture_resizing, Android's English kept as is.
         (Key::TooBigPictureResizing, Lang::Ru) => "Картинка больше 5 мегабайт, ужимаем",
         (Key::TooBigPictureResizing, Lang::En) => "Picture is bigger then 5 Mb, resizing",
-        // AM §7 play / pause.
+        // Voice bubble play / pause.
         (Key::Play, Lang::Ru) => "Играть",
         (Key::Play, Lang::En) => "Play",
         (Key::Pause, Lang::Ru) => "Пауза",
@@ -792,10 +798,10 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         // Not in Android (its record button has no label); the mic button's name and tooltip.
         (Key::RecordVoice, Lang::Ru) => "Записать голосовое сообщение",
         (Key::RecordVoice, Lang::En) => "Record a voice message",
-        // Spec §9b: the disabled mic's hint.
+        // The disabled mic's hint.
         (Key::InstallFfmpeg, Lang::Ru) => "Установите ffmpeg, чтобы записывать голосовые",
         (Key::InstallFfmpeg, Lang::En) => "Install ffmpeg to record voice messages",
-        // AM §7 recording_too_short / failed_to_start_recording.
+        // Android recording_too_short / failed_to_start_recording.
         (Key::RecordingTooShort, Lang::Ru) => "Запись слишком короткая",
         (Key::RecordingTooShort, Lang::En) => "Recording too short",
         (Key::FailedToStartRecording, Lang::Ru) => "Не удалось начать запись",
@@ -805,7 +811,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::RecordingFailed, Lang::En) => "Could not save the recording",
         (Key::NoMicrophone, Lang::Ru) => "Микрофон не найден",
         (Key::NoMicrophone, Lang::En) => "No microphone found",
-        // AM §9 avatar_too_large / error_loading_image / error_loading_avatar_picture.
+        // Android avatar_too_large / error_loading_image / error_loading_avatar_picture.
         (Key::AvatarTooLarge, Lang::Ru) => "Аватар слишком велик!",
         (Key::AvatarTooLarge, Lang::En) => "Avatar is too large!",
         (Key::ErrorLoadingImage, Lang::Ru) => "Ошибка загрузки изображения!",
@@ -815,7 +821,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         // Not in Android (a tap on the avatar there, no label); the avatar button's name and tooltip.
         (Key::ChangeAvatar, Lang::Ru) => "Изменить аватар",
         (Key::ChangeAvatar, Lang::En) => "Change avatar",
-        // Settings (AS §1, Android strings.xml / spinners.xml).
+        // Settings (Android strings.xml / spinners.xml).
         (Key::Settings, Lang::Ru) => "Настройки",
         (Key::Settings, Lang::En) => "Settings",
         (Key::ReceiveSettings, Lang::Ru) => "Настройки приёма",
@@ -900,7 +906,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::FontLarge, Lang::En) => "Large",
         (Key::FontVeryLarge, Lang::Ru) => "Самый крупный",
         (Key::FontVeryLarge, Lang::En) => "Very large",
-        // Desktop only (design §7): own strings for the appearance section.
+        // Desktop only: own strings for the appearance section.
         (Key::Appearance, Lang::Ru) => "Внешний вид",
         (Key::Appearance, Lang::En) => "Appearance",
         (Key::Theme, Lang::Ru) => "Тема",
@@ -915,12 +921,12 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::Language, Lang::En) => "Language",
         (Key::LanguageSystem, Lang::Ru) => "Системный",
         (Key::LanguageSystem, Lang::En) => "System",
-        // AS §1.1 rows 6, 7, 10, 11.
+        // Settings rows for contact requests, font size and the advanced section.
         (Key::BackupAndRestore, Lang::Ru) => "Бэкап и восстановление",
         (Key::BackupAndRestore, Lang::En) => "Backup & Restore",
         (Key::BackupAndRestoreDesc, Lang::Ru) => "Сохранение данных и восстановление из сохранённой копии.",
         (Key::BackupAndRestoreDesc, Lang::En) => "Export or import your data and media files.",
-        // BackupActivity (AS §2), Android strings.xml backup_*.
+        // BackupActivity, Android strings.xml backup_*.
         (Key::BackupExport, Lang::Ru) => "Бэкап данных",
         (Key::BackupExport, Lang::En) => "Export data",
         (Key::BackupExportDesc, Lang::Ru) => "Сохранение всех данных приложения в zip-архив.",
@@ -941,6 +947,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::BackupImportSuccess, Lang::En) => "Backup imported successfully!",
         (Key::BackupImportFailed, Lang::Ru) => "Ошибка импорта бэкапа: %s",
         (Key::BackupImportFailed, Lang::En) => "Failed to import backup: %s",
+        (Key::DataNotRestored, Lang::Ru) => "Не удалось вернуть ваши данные: %s\nЗакройте программы, которые могут держать файлы Mimir открытыми, и запустите Mimir снова.",
+        (Key::DataNotRestored, Lang::En) => "Could not bring your data back: %s\nClose programs that may hold Mimir's files open and start Mimir again.",
         (Key::BackupInvalidFile, Lang::Ru) => "Это не файл бэкапа Mimir!",
         (Key::BackupInvalidFile, Lang::En) => "This is not a valid Mimir backup file!",
         (Key::BackupImportWarningTitle, Lang::Ru) => "Импорт бэкапа?",
@@ -971,7 +979,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::AboutVersion, Lang::En) => "Version: %1$s",
         (Key::Links, Lang::Ru) => "Ссылки",
         (Key::Links, Lang::En) => "Links",
-        // AS §1.7 (Advanced) and the strings of its dialogs.
+        // Advanced settings and the strings of its dialogs.
         (Key::ConfigurePeers, Lang::Ru) => "Настройка узлов",
         (Key::ConfigurePeers, Lang::En) => "Configure peers",
         (Key::ConfigurePeersDesc, Lang::Ru) => "Настройка узлов для подключения к сети Yggdrasil.",
@@ -980,6 +988,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::PeerUrl, Lang::En) => "Peer URL:",
         (Key::PeerUrlHint, Lang::Ru) => "tcp://1.2.3.4:1234 или tls://example.com:443",
         (Key::PeerUrlHint, Lang::En) => "tcp://1.2.3.4:1234 or tls://example.com:443",
+        (Key::PeerExists, Lang::Ru) => "Этот узел уже есть в списке",
+        (Key::PeerExists, Lang::En) => "This peer is already in the list",
         (Key::FixCorrupted, Lang::Ru) => "Исправить поломанные сообщения",
         (Key::FixCorrupted, Lang::En) => "Fix corrupted messages",
         (Key::FixCorruptedDesc, Lang::Ru) => "Просканировать и исправить сообщения в группах в неверном формате.",
@@ -1042,7 +1052,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
     }
 }
 
-/// File size units, bytes to GiB (AM §12.C: localized, unlike Android's hard-coded B/KB/MB).
+/// File size units, bytes to GiB (localized, unlike Android's hard-coded B/KB/MB).
 pub fn size_units(lang: Lang) -> [&'static str; 4] {
     match lang {
         Lang::Ru => ["Б", "КБ", "МБ", "ГБ"],

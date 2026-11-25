@@ -55,7 +55,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
                 ui.separator();
                 let name = crate::model::chat_list::display_name(&q.nickname, &q.pubkey);
                 ui.horizontal(|ui| {
-                    // AM §9: 48 px in contact requests.
+                    // 48 px in contact requests.
                     avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &q.avatar).as_deref(), avatar_color(&q.pubkey), 48., 3.);
                     ui.vertical(|ui| {
                         ui.strong(name);
@@ -92,6 +92,9 @@ mod tests {
     use egui_kittest::{kittest::Queryable as _, Harness};
     use std::time::{Duration, Instant};
 
+    // The started core's network events and worker results repaint at any time, so run() can exceed max_steps
+    // and panic (the flake): these tests settle with run_ok() and wait for the state they need.
+
     const KEY: [u8; 32] = [9; 32];
 
     fn open_requests(started: bool) -> Harness<'static, MimirDesktop> {
@@ -103,9 +106,9 @@ mod tests {
         }
         h.state().core.add_contact_request(KEY.to_vec(), "привет, я Боб".into(), "Боб".into(), String::new(), None).unwrap();
         h.state_mut().refresh_requests();
-        h.run();
+        h.run_ok();
         h.get_by_label("Запросы в контакты: 1").click();
-        h.run();
+        h.run_ok();
         h
     }
 
@@ -113,7 +116,7 @@ mod tests {
         let end = Instant::now() + Duration::from_secs(5);
         while h.state().state.requests_count != n && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
-            h.run();
+            h.run_ok();
         }
         assert_eq!(h.state().state.requests_count, n);
     }
@@ -123,7 +126,7 @@ mod tests {
         assert!(h.state().state.show_requests);
         assert!(h.query_by_label("привет, я Боб").is_some());
         h.get_by_label("Принять").click();
-        h.run();
+        h.run_ok();
         wait_for_count(&mut h, 0);
         assert!(h.state().core.get_contact_by_pubkey(KEY.to_vec()).is_some());
         assert!(h.state().state.chats.iter().any(|c| c.pubkey == KEY));
@@ -132,12 +135,12 @@ mod tests {
     #[test] fn accepting_offline_requester_shows_no_status_line() {
         let mut h = open_requests(true);
         h.get_by_label("Принять").click();
-        h.run();
+        h.run_ok();
         // The job ends with a chat list rebuild (success) or a status line (failure).
         let end = Instant::now() + Duration::from_secs(5);
         while !h.state().state.chats.iter().any(|c| c.pubkey == KEY) && h.state().state.status.is_none() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
-            h.run();
+            h.run_ok();
         }
         assert_eq!(h.state().state.status, None);
         assert!(h.state().state.chats.iter().any(|c| c.pubkey == KEY));
@@ -157,7 +160,7 @@ mod tests {
     #[test] fn decline_removes_without_adding() {
         let mut h = open_requests(true);
         h.get_by_label("Отклонить").click();
-        h.run();
+        h.run_ok();
         wait_for_count(&mut h, 0);
         assert!(h.state().core.get_contact_by_pubkey(KEY.to_vec()).is_none());
     }
@@ -166,7 +169,7 @@ mod tests {
         let mut h = open_requests(false);
         h.get_by_label("Принять").click();
         h.get_by_label("Отклонить").click();
-        h.run();
+        h.run_ok();
         assert_eq!(h.state().state.requests_count, 1);
         assert!(h.query_by_label("Сеть ещё не запущена, подождите").is_some());
     }

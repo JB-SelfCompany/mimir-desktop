@@ -1,6 +1,6 @@
 //! Mediators registry modal (Android MediatorsActivity): the list with connection dots, add / rename /
 //! default / delete, and invitations to mediators we do not use yet. Every core call runs on the worker
-//! (Android does them on the UI thread, AG §5.13); only reads of stored rows happen inline.
+//! (Android does them on the UI thread); only reads of stored rows happen inline.
 use crate::{
     app::MimirDesktop,
     core::worker::WorkResult,
@@ -264,7 +264,9 @@ fn form_dialog(app: &mut MimirDesktop, ctx: &egui::Context) {
         }
         ui.add_space(8.);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            go = ui.add_enabled(enabled, primary_button(&p, tr(lang, if renaming { Key::Save } else { Key::AddButton }))).clicked();
+            // Enter in either field submits, as the button does.
+            let enter = (key.lost_focus() || name.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            go = ui.add_enabled(enabled, primary_button(&p, tr(lang, if renaming { Key::Save } else { Key::AddButton }))).clicked() || (enter && enabled);
             cancel = ui.button(tr(lang, Key::Cancel)).clicked();
         });
     });
@@ -669,6 +671,19 @@ mod tests {
         h.get_by_label("Скопировать").click();
         h.run();
         assert!(h.state().state.status_ok && status(&h).is_some(), "copied notice");
+    }
+
+    #[test]
+    fn enter_submits_the_form() {
+        let mut h = open_dialog(true);
+        h.get_by_label("+").click();
+        h.run();
+        h.get_by_label("Публичный ключ:").click();
+        h.get_by_label("Публичный ключ:").type_text("zz");
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(h.query_by_label("Публичный ключ должен состоять из 64 шестнадцатеричных символов").is_some(), "Enter ran the submit");
     }
 
     #[test]

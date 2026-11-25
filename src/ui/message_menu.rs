@@ -16,9 +16,9 @@ pub enum Action {
     Copy,
     Forward(i64), // message id
     Delete(i64),  // message id
-    /// Fetch the attachment (P3-R9).
+    /// Fetch the attachment.
     Download,
-    /// Open the attachment with the system app (P3-R8).
+    /// Open the attachment with the system app.
     Open,
     /// Show the picture in the viewer.
     View,

@@ -9,14 +9,19 @@ use crate::{
 };
 use eframe::egui::{self, Align, Id, Layout, RichText, Spinner};
 use mimir::MimirError;
-use std::time::Duration;
+use std::{sync::atomic::{AtomicU64, Ordering}, time::Duration};
 
-/// Android retries 6 times; desktop needs fewer (P2 plan).
+/// Android retries 6 times; desktop needs fewer.
 const LOOKUP_ATTEMPTS: u32 = 3;
 const LOOKUP_PAUSE: Duration = Duration::from_secs(2);
 
+/// Source of the lookup tokens: a result belongs to the dialog that asked only if the tokens match.
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
 pub struct JoinDialog {
     pub link: GroupLink,
+    /// The lookup whose result this dialog accepts (a closed or replaced dialog's lookup may still be running).
+    pub token: u64,
     /// What the mediator told us about the group; `None` until the lookup succeeds.
     pub info: Option<mimir::ChannelInfo>,
     /// A lookup job is in flight.
@@ -36,24 +41,26 @@ pub fn open(app: &mut MimirDesktop, link: GroupLink) {
         }
         return;
     }
-    app.state.join = Some(JoinDialog { link, info: None, looking: false, joining: false, error: None });
+    app.state.join = Some(JoinDialog { link, token: 0, info: None, looking: false, joining: false, error: None });
     lookup(app);
 }
 
 fn lookup(app: &mut MimirDesktop) {
     let Some(d) = app.state.join.as_mut() else { return };
     d.looking = true;
+    d.token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    let token = d.token;
     let (mediator, chat_id) = (d.link.mediator.to_vec(), d.link.chat_id);
     app.group_worker.submit(Box::new(move |core| {
         for attempt in 1..=LOOKUP_ATTEMPTS {
             match core.preview_public_group(mediator.clone(), chat_id) {
-                Ok(info) => return WorkResult::Preview(Some(info)),
+                Ok(info) => return WorkResult::Preview { token, info: Some(info) },
                 // The mediator may still be connecting.
                 Err(MimirError::Connection(_)) if attempt < LOOKUP_ATTEMPTS => std::thread::sleep(LOOKUP_PAUSE),
                 Err(_) => break,
             }
         }
-        WorkResult::Preview(None)
+        WorkResult::Preview { token, info: None }
     }));
 }
 
@@ -64,11 +71,8 @@ pub fn retry_lookup(app: &mut MimirDesktop) {
     }
 }
 
-pub fn preview_done(app: &mut MimirDesktop, info: Option<mimir::ChannelInfo>) {
-    let Some(d) = app.state.join.as_mut() else { return };
-    if info.as_ref().is_some_and(|i| i.chat_id != d.link.chat_id) {
-        return; // a lookup for a dialog that has since been replaced
-    }
+pub fn preview_done(app: &mut MimirDesktop, token: u64, info: Option<mimir::ChannelInfo>) {
+    let Some(d) = app.state.join.as_mut().filter(|d| d.token == token) else { return }; // a closed or replaced dialog's lookup
     d.looking = false;
     d.info = info;
 }
@@ -205,6 +209,10 @@ mod tests {
         (h, tx)
     }
 
+    fn token(h: &H) -> u64 {
+        h.state().state.join.as_ref().unwrap().token
+    }
+
     fn done(h: &mut H, tx: &Sender<Event>, r: WorkResult) {
         tx.send(Event::WorkDone(r)).unwrap();
         h.step();
@@ -219,7 +227,8 @@ mod tests {
         assert!(h.query_by_label("Медиатор: ABABABAB").is_some());
         assert!(h.query_by_label("Войти в эту группу?").is_some());
         assert!(h.query_by_label_contains("При входе вы регистрируетесь на медиаторе этой группы").is_some());
-        done(&mut h, &tx, WorkResult::Preview(Some(info())));
+        let t = token(&h);
+        done(&mut h, &tx, WorkResult::Preview { token: t, info: Some(info()) });
         assert!(h.query_by_label("Ищем группу…").is_none());
         assert!(h.query_by_label("Дача").is_some());
         assert!(h.query_by_label("Про дачу").is_some());
@@ -227,9 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_lookup_result_is_ignored() {
+        let (mut h, tx) = open_dialog();
+        let stale = token(&h) - 1;
+        done(&mut h, &tx, WorkResult::Preview { token: stale, info: None });
+        assert!(h.state().state.join.as_ref().unwrap().looking, "still waiting for its own lookup");
+    }
+
+    #[test]
     fn lookup_failure_still_allows_joining() {
         let (mut h, tx) = open_dialog();
-        done(&mut h, &tx, WorkResult::Preview(None));
+        let t = token(&h);
+        done(&mut h, &tx, WorkResult::Preview { token: t, info: None });
         assert!(h.query_by_label("Ищем группу…").is_none());
         assert!(h.query_by_label("Не удалось связаться с медиатором, чтобы посмотреть группу. Войти всё равно можно.").is_some());
         assert!(!h.get_by_role_and_label(Role::Button, "Войти").accesskit_node().is_disabled());

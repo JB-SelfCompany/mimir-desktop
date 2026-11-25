@@ -9,7 +9,7 @@ use crate::{
 use crate::ui::theme::{dialog, dialog_title, field_label, palette, primary_button};
 use eframe::egui::{self, Align, Color32, Id, Layout, TextEdit};
 
-/// A group link in the key field goes to the join dialog, a channel link gets the «next version» notice (AG §1.3).
+/// A group link in the key field goes to the join dialog, a channel link gets the «next version» notice.
 /// True when the input was a group or channel link.
 fn route_group_link(app: &mut MimirDesktop) -> bool {
     let Some(link) = parse_group_link(&app.state.add_dialog.key) else { return false };

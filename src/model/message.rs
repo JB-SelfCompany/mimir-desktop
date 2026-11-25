@@ -6,7 +6,7 @@ use serde::Deserialize;
 pub enum MsgBody {
     Text(String),
     Image(AttachmentMeta),
-    /// A file, or an `audio/*` file that is not a voice message (P3-R4).
+    /// A file, or an `audio/*` file that is not a voice message.
     File(AttachmentMeta),
     Voice(AttachmentMeta),
     VideoMessage(AttachmentMeta),
@@ -23,12 +23,15 @@ struct Reaction {
 }
 
 pub fn decode(msg_type: i32, data: Option<&[u8]>) -> MsgBody {
+    // A call row carries no meaningful body (Android getStoredMessageText ignores it).
+    if msg_type == 2 {
+        return MsgBody::Call;
+    }
     let Some(text) = data.and_then(|d| std::str::from_utf8(d).ok()) else {
         return MsgBody::Unsupported;
     };
     match msg_type {
         0 => MsgBody::Text(text.to_string()),
-        2 => MsgBody::Call,
         1 | 3 | 4 => AttachmentMeta::parse(text.as_bytes()).map_or(MsgBody::Unsupported, |a| match kind(msg_type, &a) {
             AttachmentKind::Image => MsgBody::Image(a),
             AttachmentKind::Voice => MsgBody::Voice(a),
@@ -75,7 +78,7 @@ mod tests {
         let d = br#"{"name":"a1b2","originalName":"voice_message.m4a","size":11776,"mimeType":"audio/mp4"}"#;
         let MsgBody::Voice(a) = decode(3, Some(d)) else { panic!() };
         assert_eq!((a.display_name(), a.size), ("voice_message.m4a", 11776));
-        // P3-R4: other audio is a file (it plays from its file bubble).
+        // Other audio is a file (it plays from its file bubble).
         let song = br#"{"name":"a1b2.mp3","originalName":"song.mp3","size":5,"mimeType":"audio/mpeg"}"#;
         assert!(matches!(decode(3, Some(song)), MsgBody::File(a) if a.display_name() == "song.mp3"));
     }
@@ -97,6 +100,8 @@ mod tests {
         assert!(matches!(decode(1, Some(br#"{"name":"h"}"#)), MsgBody::Image(a) if a.display_name() == "h" && a.caption.is_empty()));
         assert!(matches!(decode(4, Some(br#"{"name":"v"}"#)), MsgBody::VideoMessage(a) if a.name == "v"));
         assert_eq!(decode(2, Some(b"")), MsgBody::Call);
+        assert_eq!(decode(2, None), MsgBody::Call, "a call row without a body is still a call");
+        assert_eq!(decode(2, Some(&[0xff])), MsgBody::Call);
     }
     #[test] fn preview_variants() {
         let img = MsgBody::Image(AttachmentMeta { name: "p.png".into(), caption: "hi".into(), ..Default::default() });

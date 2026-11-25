@@ -1,4 +1,4 @@
-//! Voice messages from the composer (P3-R5): the mic button, the recording bar (timer, ✕, ✓) and the encode job.
+//! Voice messages from the composer: the mic button, the recording bar (timer, ✕, ✓) and the encode job.
 //! ✓ sends at once; the 60 s cap stops the take and stages it in the attachment panel; ✕ throws it away.
 use crate::{
     app::MimirDesktop,
@@ -10,7 +10,7 @@ use crate::{
 use eframe::egui::{self, vec2, Align, Color32, Layout, Painter, Pos2, Rect, Role, Sense, Shape, Stroke, Ui, Vec2, WidgetInfo};
 use std::{f32::consts::PI, path::Path, sync::mpsc::{self, Receiver, TryRecvError}, time::Duration};
 
-/// The voice wire format (AM §7).
+/// The voice wire format.
 const VOICE_NAME: &str = "voice_message.m4a";
 const VOICE_MIME: &str = "audio/mp4";
 
@@ -68,8 +68,8 @@ fn open() -> Result<Recorder, String> {
     Recorder::start()
 }
 
-/// The round mic button in the send button's place (empty composer, no attachment: AM §7). Without ffmpeg it is
-/// disabled and its tooltip says why (spec §9b).
+/// The round mic button in the send button's place (empty composer, no attachment). Without ffmpeg it is
+/// disabled and its tooltip says why.
 pub fn mic(app: &mut MimirDesktop, ui: &mut Ui, size: f32, p: &Palette) {
     let lang = app.lang;
     let have_ffmpeg = app.state.ffmpeg.is_some();
@@ -134,7 +134,7 @@ fn finish(app: &mut MimirDesktop, ctx: &egui::Context, then: Then) {
     let Some(rec) = app.state.composer.voice.rec.take() else { return };
     let Some(bin) = app.state.ffmpeg.clone() else { return rec.cancel() };
     let (bitrate, lang, ctx) = (voice_bitrate(app.settings.media.voice_bitrate), app.lang, ctx.clone());
-    let out = stage::temp_path("m4a"); // a new file per take (LM §2 reused one per process)
+    let out = stage::temp_path("m4a"); // a new file per take
     #[cfg(test)]
     {
         app.state.composer.voice.last_out = Some(out.clone());
@@ -150,7 +150,7 @@ fn finish(app: &mut MimirDesktop, ctx: &egui::Context, then: Then) {
     app.state.composer.voice.encoding = Some((rx, then));
 }
 
-/// The setting if it is one of Android's three bitrates (AM §7), else the default 32000.
+/// The setting if it is one of Android's three bitrates, else the default 32000.
 fn voice_bitrate(b: u32) -> u32 {
     if matches!(b, 32000 | 64000 | 128000) { b } else { 32000 }
 }
@@ -319,7 +319,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         h.run_steps(3);
         assert_eq!(msgs(&h), 0, "✕ sends nothing");
-        // ✓ encodes and sends right away (P3-R5), as a reply when one is set.
+        // ✓ encodes and sends right away, as a reply when one is set.
         h.state_mut().state.reply_to = Some((5, "привет".into()));
         h.run_steps(2); // the reply row moves the buttons
         set_recorder(take(3.2));
@@ -389,7 +389,7 @@ mod tests {
         h.run_steps(2); // the panel's first frame moves the send button
         let s = h.state().state.composer.attachment.clone().unwrap();
         assert_eq!((s.original_name.as_str(), s.mime.as_str(), s.msg_type, s.temp), ("voice_message.m4a", "audio/mp4", 3, true));
-        assert_eq!(msgs(&h), 0, "staged, not sent (P3-R5)");
+        assert_eq!(msgs(&h), 0, "staged, not sent");
         h.get_by_label("Отправить").click();
         h.step();
         wait_until(&mut h, "sent with Send", |h| msgs(h) == 1);

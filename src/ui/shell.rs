@@ -75,7 +75,7 @@ fn toolbar(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
         ui.set_height(44.);
         ui.set_width(ui.available_width());
         ui.horizontal_centered(|ui| {
-            // AM §9: our avatar (32/6) is the profile button once we have one.
+            // Our avatar (32/6) is the profile button once we have one.
             let stored = app.state.own_avatar.get_or_insert_with(|| app.core.get_account(profile::ACCOUNT).map(|a| a.avatar).unwrap_or_default());
             let profile = match crate::media::avatar::resolve(&app.paths.core_dir, stored) {
                 Some(path) => {
@@ -299,6 +299,7 @@ mod tests {
         assert!(h.query_by_label("Избранное").is_some());
         assert!(h.query_by_label("Mimir").is_some());
         assert!(h.state().settings.intro_done);
+        assert!(Settings::load(&h.state().paths.settings_file).intro_done, "saved to disk, not only in memory");
     }
 
     #[test]

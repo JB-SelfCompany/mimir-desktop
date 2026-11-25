@@ -1,4 +1,4 @@
-//! Group and channel invite links (AG §1.3): `mimir://<g|c>/<mediator hex>/<chat id>#<key base64url>`, and the same
+//! Group and channel invite links: `mimir://<g|c>/<mediator hex>/<chat id>#<key base64url>`, and the same
 //! path under `https://go.mimir.im/`.
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn https_group_link() {
-        // AG §5.6: Android routes only https `c` links; `g` works here.
+        // Android routes only https `c` links; `g` works here.
         assert_eq!(parse_group_link(&format!("https://go.mimir.im/g/{MEDIATOR}/123456#{KEY}")), Some(sample()));
         let c = parse_group_link(&format!("https://go.mimir.im/c/{MEDIATOR}/123456#{KEY}")).unwrap();
         assert_eq!(c.kind, LinkKind::Channel);

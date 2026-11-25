@@ -1,7 +1,7 @@
 //! Chat area: header, day separators, message bubbles with reaction chips, hover toolbar, menu, forward and delete dialogs.
 use crate::{
     app::MimirDesktop,
-    core::net,
+    core::{net, worker::WorkResult},
     i18n::{month, tr, trf, Key, Lang},
     model::{
         attachment::{local_path, request_download, AttachmentMeta, Transfer},
@@ -77,7 +77,7 @@ fn now_ms() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp() * 1000
 }
 
-/// Text of a message for display, copy and forward; non-text bodies show their chat-list preview (Plan 3 adds media).
+/// Text of a message for display, copy and forward; non-text bodies show their chat-list preview.
 fn text_of(m: &StoredMessage, lang: Lang) -> (String, bool) {
     match decode(m.msg_type, m.data.as_deref()) {
         MsgBody::Text(t) => (t, false),
@@ -122,7 +122,7 @@ struct RowCx<'a> {
     posters: &'a mut media::ffmpeg::Posters,
     ffmpeg: Option<&'a Path>,
     player: &'a media::player::Player,
-    /// Message text size (settings «Размер шрифта сообщений», AS §1.6).
+    /// Message text size (settings «Размер шрифта сообщений»).
     font: f32,
 }
 
@@ -133,7 +133,7 @@ fn day_separator(painter: &egui::Painter, row_rect: Rect, m: &StoredMessage, lan
     painter.galley(r.center() - label.size() / 2., label, p.text_dim);
 }
 
-/// A group system row (P2-R1): a centred muted line like the day separator; no bubble, menu or toolbar.
+/// A group system row: a centred muted line like the day separator; no bubble, menu or toolbar.
 fn system_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response {
     let (p, lang) = (cx.p, cx.lang);
     let none = Members::default();
@@ -170,7 +170,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
         return system_row(ui, m, cx);
     }
     let (p, lang, out) = (cx.p, cx.lang, !m.incoming);
-    // Group: the sender's avatar left of an incoming bubble (AM §9, MessageAdapter), SENDER_AV + a 4 px gap.
+    // Group: the sender's avatar left of an incoming bubble, SENDER_AV + a 4 px gap.
     let av_w = if cx.members.is_some() && m.incoming { SENDER_AV + 4. } else { 0. };
     let width = ui.available_width();
     let wrap = max_width(width) - 24. - av_w;
@@ -190,7 +190,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
         (Some(_), None) => None,
     };
     let mref = MsgRef { id: m.id, guid: m.guid, text: text_of(m, lang).0, file, forward };
-    // An attachment's text is its caption (none: no text, AM §12.B); other bodies without text show their preview.
+    // An attachment's text is its caption (none: no text); other bodies without text show their preview.
     let (text, italic) = match (&body_msg, meta) {
         (_, Some(a)) => (a.caption.clone(), false),
         (MsgBody::Text(t), None) => (t.clone(), false),
@@ -407,6 +407,9 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     row_resp
 }
 
+/// Height of the chat header (the narrow info overlay starts below it, so ⋮ stays reachable).
+pub const HEADER_H: f32 = 44.;
+
 /// Draws the header; returns whether the avatar/name was clicked (toggles the info panel) and the ⋮ button.
 fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Palette) -> (bool, Option<egui::Response>) {
     let AppState { chats, online, open_chat, thumbs, .. } = state;
@@ -420,10 +423,10 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
     let online = !group && online.contains(&chat.pubkey);
     let (mut toggle, mut more) = (false, None);
     Frame::NONE.fill(p.toolbar).inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-        ui.set_height(44.);
+        ui.set_height(HEADER_H);
         ui.set_width(ui.available_width());
         ui.horizontal_centered(|ui| {
-            // AM §9: 32 px in the chat toolbar.
+            // 32 px in the chat toolbar.
             let (av, _) = ui.allocate_exact_size(vec2(32., 32.), Sense::hover());
             let path = path.as_deref();
             match chat.key {
@@ -529,23 +532,24 @@ fn handle(app: &mut MimirDesktop, ctx: &egui::Context, action: Action, m: &MsgRe
             }
         }
         Action::DeleteFile => {
-            if let Some((path, _)) = &m.file {
-                // ponytail: unlinked on the UI thread; it is one metadata operation, not a copy.
-                match std::fs::remove_file(path) {
-                    Ok(()) => app.state.thumbs.invalidate(path),
-                    Err(e) => app.error_text(format!("{}: {e}", tr(app.lang, Key::DeleteFile))),
-                }
+            if let Some((path, _)) = m.file.clone() {
+                // On the worker; the bubble re-checks the file every frame, and the thumbnail cache follows its mtime.
+                let what = tr(app.lang, Key::DeleteFile);
+                app.worker.submit(Box::new(move |_| match std::fs::remove_file(&path) {
+                    Ok(()) => WorkResult::Done,
+                    Err(e) => WorkResult::Error(format!("{what}: {e}")),
+                }));
             }
         }
     }
 }
 
-/// Download click: marks the row at once (sibling fetches send no progress), then starts the fetch (P3-R9).
+/// Download click: marks the row at once (sibling fetches send no progress), then starts the fetch.
 fn download(app: &mut MimirDesktop, guid: i64) {
     let Some(chat) = &app.state.open_chat else { return };
     let key = chat.key;
     let Some(meta) = chat.timeline.msgs.iter().find(|m| m.guid == guid).and_then(|m| AttachmentMeta::parse(m.data.as_deref()?)) else { return };
-    // request_download fetches a group row only with its key, a 1:1 row only without one (CA §9.1).
+    // request_download fetches a group row only with its key, a 1:1 row only without one.
     if key.is_group() == meta.key.is_some() {
         app.state.transfers.insert(guid, Transfer::Downloading { done: 0, total: meta.size });
     }
@@ -576,12 +580,15 @@ fn confirm_delete(app: &mut MimirDesktop, ctx: &egui::Context) {
                     ChatKey::Group(gid) => crate::model::send::delete_group_message(&app.core, &app.group_worker, gid, m.guid),
                     ChatKey::Contact(_) => app.core.delete_message(id),
                 };
-                // The core hands back the attachment's storage name; the file goes with its row (LM §10).
-                // ponytail: unlinked on the UI thread, one metadata operation; a failure leaves an orphan file.
+                // The core hands back the attachment's storage name; the file goes with its row, on the
+                // worker. ponytail: a failure leaves an orphan file (the orphan cleaner finds it).
                 let meta = AttachmentMeta { name: file.unwrap_or_default(), ..Default::default() };
                 if let Some(path) = local_path(&app.paths.files_dir, &meta) {
-                    let _ = std::fs::remove_file(&path);
                     app.state.thumbs.invalidate(&path);
+                    app.worker.submit(Box::new(move |_| {
+                        let _ = std::fs::remove_file(&path);
+                        WorkResult::Done
+                    }));
                 }
                 if i < t.heights.len() { t.heights.remove(i); }
                 chat.reactions.remove(&m.guid);
@@ -605,7 +612,7 @@ fn forward_dialog(app: &mut MimirDesktop, ctx: &egui::Context) {
         ui.add(TextEdit::singleline(&mut dlg.query).hint_text(tr(lang, Key::Search)).desired_width(f32::INFINITY));
         let q = dlg.query.to_lowercase();
         ScrollArea::vertical().max_height(300.).show(ui, |ui| {
-            // A channel cannot be written to in v1 (P2-R8), and a read-only group has no composer.
+            // A channel cannot be written to in v1, and a read-only group has no composer.
             let writable = |r: &&crate::model::chat_list::ChatRow| r.group.is_none_or(|g| !g.is_channel && !g.read_only);
             for row in app.state.chats.iter().filter(writable).filter(|r| r.name.to_lowercase().contains(&q)) {
                 let w = ui.available_width();
@@ -707,7 +714,7 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
             info_panel::menu(app, &more);
         }
     }
-    // P2-R8: a channel cannot be written to in v1; a read-only group (removed, banned, deleted) has no composer.
+    // A channel cannot be written to in v1; a read-only group (removed, banned, deleted) has no composer.
     // Read-only by the stored flag or the subscription state (the same rule as the info panel's).
     let group = app.state.chats.iter().find(|r| r.key == key).and_then(|r| r.group);
     let is_channel = group.is_some_and(|g| g.is_channel);

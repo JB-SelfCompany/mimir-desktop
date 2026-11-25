@@ -1,4 +1,4 @@
-//! Staging a picked, dropped or pasted file for sending (AM §1-3, P3-R3): size limits, MIME by extension (LM §10)
+//! Staging a picked, dropped or pasted file for sending: size limits, MIME by extension
 //! and the image shrink rule. Runs off the UI thread (it may decode and re-encode a big picture).
 use crate::{i18n::{tr, Key, Lang}, settings::MediaSettings};
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, RgbImage};
@@ -10,7 +10,7 @@ pub const MAX_FILE: u64 = 1 << 30;
 pub const MAX_GROUP_FILE: u64 = 500 << 20;
 /// Pictures up to this size go untouched; bigger ones are shrunk (Android PICTURE_MAX_SIZE).
 const PICTURE_MAX: u64 = 5 << 20;
-/// Long edge per `images-format` index (AM §2); 0 = «Не уменьшать», never re-encoded (fixes AM §12.F).
+/// Long edge per `images-format` index; 0 = «Не уменьшать», never re-encoded.
 const MAX_EDGES: [u32; 4] = [0, 3840, 1920, 1280];
 
 /// A file ready to hand to the core as an AttachmentSpec.
@@ -21,10 +21,9 @@ pub struct Staged {
     pub mime: String,
     pub msg_type: i32,
     pub size: u64,
-    /// `path` is ours (a re-encoded or pasted image): deleted once sent or dropped.
-    // ponytail: a crash between staging and send leaves it in the system temp dir; nothing sweeps it.
+    /// `path` is ours (a re-encoded or pasted image): deleted once sent or dropped (after a crash, by `sweep_stale`).
     pub temp: bool,
-    /// A big picture was shrunk (the panel says so, AM `too_big_picture_resizing`).
+    /// A big picture was shrunk (the panel says so, Android `too_big_picture_resizing`).
     pub resized: bool,
 }
 
@@ -38,7 +37,7 @@ pub enum StageError {
     NotAFile,
 }
 
-/// The inline text for a staging failure (AM §3 texts, the ru limits corrected per AM §12.D).
+/// The inline text for a staging failure (Android's texts, with the ru limits corrected).
 pub fn error_text(e: &StageError, lang: Lang) -> String {
     tr(lang, match e {
         StageError::TooLarge(MAX_GROUP_FILE) => Key::GroupFileTooLarge,
@@ -49,7 +48,7 @@ pub fn error_text(e: &StageError, lang: Lang) -> String {
     .to_string()
 }
 
-/// MIME and message type by extension (LM §10): 1 for pictures, 3 for everything else.
+/// MIME and message type by extension: 1 for pictures, 3 for everything else.
 pub fn mime_for(path: &Path) -> (&'static str, i32) {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let mime = match ext.as_str() {
@@ -99,10 +98,10 @@ pub fn stage(src: &Path, media: &MediaSettings, limit: u64) -> Result<Staged, St
     Ok(if msg_type == 1 { shrink(s, media) } else { s })
 }
 
-/// P3-R3: a picture over 5 MiB is resized to the configured long edge and re-encoded as JPEG; a GIF never is
+/// A picture over 5 MiB is resized to the configured long edge and re-encoded as JPEG; a GIF never is
 /// (it would lose its animation), nor is any picture with «Не уменьшать». Whatever comes out (also a picture that
 /// will not decode, or is still over 5 MiB) is sent as a picture message: never dropped, never downgraded.
-// ponytail: a picture at or under 5 MiB keeps its bytes and its EXIF orientation tag (ruling I2); receivers that
+// ponytail: a picture at or under 5 MiB keeps its bytes and its EXIF orientation tag; receivers that
 // honour EXIF (Android Glide, this app) show it upright, an EXIF-blind one shows it sideways.
 fn shrink(s: Staged, media: &MediaSettings) -> Staged {
     let edge = MAX_EDGES.get(media.image_format as usize).copied().unwrap_or(0);
@@ -139,7 +138,7 @@ pub(crate) fn open_oriented(path: &Path) -> Option<DynamicImage> {
     Some(img)
 }
 
-/// JPEG has no alpha: transparent pixels become white, not black (LM §6 to_rgb8 bug).
+/// JPEG has no alpha: transparent pixels become white, not black.
 pub(crate) fn flatten(img: DynamicImage) -> RgbImage {
     if !img.color().has_alpha() {
         return img.to_rgb8();
@@ -172,12 +171,33 @@ pub fn discard(s: Staged) {
     }
 }
 
+/// Our temp files' name prefix.
+const TEMP_PREFIX: &str = "mimir_staged_";
+/// A staged temp file this old is left from a crashed run. Younger ones may belong to another running instance (one
+/// per data dir), which shares the temp dir.
+const STALE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// A fresh path in the system temp dir.
 pub(crate) fn temp_path(ext: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("mimir_staged_{}_{t}_{n}.{ext}", std::process::id()))
+    std::env::temp_dir().join(format!("{TEMP_PREFIX}{}_{t}_{n}.{ext}", std::process::id()))
+}
+
+/// Deletes the staged temp files a crash left behind (run once at startup, off the UI thread).
+pub fn sweep_stale() {
+    sweep(&std::env::temp_dir(), STALE);
+}
+
+fn sweep(dir: &Path, age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let old = || e.metadata().and_then(|m| m.modified()).is_ok_and(|t| now.duration_since(t).is_ok_and(|d| d >= age));
+        if e.file_name().to_string_lossy().starts_with(TEMP_PREFIX) && old() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -198,7 +218,7 @@ mod tests {
 
     #[test]
     fn mime_table() {
-        // LM §10 by extension (lowercased); only images are type 1.
+        // By extension (lowercased); only images are type 1.
         for (name, mime, t) in [
             ("a.PNG", "image/png", 1), ("a.jpeg", "image/jpeg", 1), ("a.gif", "image/gif", 1), ("a.webp", "image/webp", 1), ("a.bmp", "image/bmp", 1),
             ("a.mp3", "audio/mpeg", 3), ("a.opus", "audio/ogg", 3), ("a.m4a", "audio/mp4", 3), ("a.wav", "audio/wav", 3),
@@ -234,7 +254,7 @@ mod tests {
         assert!(s.size <= PICTURE_MAX);
         assert_eq!(image::ImageReader::open(&s.path).unwrap().with_guessed_format().unwrap().format(), Some(image::ImageFormat::Jpeg));
         std::fs::remove_file(&s.path).unwrap();
-        // «Не уменьшать» (format 0) sends it unchanged, still as a picture (P3-R3 as ruled).
+        // «Не уменьшать» (format 0) sends it unchanged, still as a picture.
         let s = stage_path(&src, &MediaSettings::default()).unwrap();
         assert_eq!((&s.path, s.msg_type, s.mime.as_str(), s.temp, s.resized), (&src, 1, "image/png", false, false));
     }
@@ -301,6 +321,22 @@ mod tests {
         assert_eq!(stage_path(&empty, &m), Err(StageError::Unreadable), "zero bytes: nothing to send");
         assert_eq!(error_text(&StageError::Unreadable, Lang::Ru), "Не удалось прочитать файл");
         assert_eq!(error_text(&StageError::NotAFile, Lang::En), "Only files can be sent, not folders");
+    }
+
+    #[test]
+    fn sweep_deletes_only_old_staged_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day_ago = std::time::SystemTime::now() - STALE - std::time::Duration::from_secs(60);
+        for name in ["mimir_staged_1_2_3.jpg", "mimir_staged_4_5_6.png", "other.jpg"] {
+            File::create(tmp.path().join(name)).unwrap();
+        }
+        for name in ["mimir_staged_1_2_3.jpg", "other.jpg"] {
+            File::options().write(true).open(tmp.path().join(name)).unwrap().set_modified(day_ago).unwrap();
+        }
+        sweep(tmp.path(), STALE);
+        let mut left: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["mimir_staged_4_5_6.png", "other.jpg"], "a fresh one may be another instance's; others are not ours");
     }
 
     #[test]

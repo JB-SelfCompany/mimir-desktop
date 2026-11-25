@@ -6,7 +6,7 @@ use crate::{
 use mimir::{parse_system_message, MimirApp, StoredGroupMessage, StoredMember, StoredMessage, SystemMessage};
 use std::collections::HashMap;
 
-/// `msg_type` of a mediator system row (CG §2).
+/// `msg_type` of a mediator system row.
 pub const SYSTEM: i32 = 1000;
 /// Rows scanned for ChatInfoChanged on a members/history event.
 const INFO_SCAN: i32 = 50;
@@ -91,7 +91,7 @@ pub enum Role {
     Banned,
 }
 
-/// Role from the permission bits (CG §3), the highest of owner > admin > mod first.
+/// Role from the permission bits, the highest of owner > admin > mod first.
 pub fn role_of(perms: i32) -> Role {
     match perms {
         p if p & 0x80 != 0 => Role::Owner,
@@ -114,7 +114,7 @@ pub fn role_name(role: Role, lang: Lang) -> &'static str {
     })
 }
 
-/// Role name in a PermsChanged row (AG §1.5): banned is checked first, then admin and moderator by bit;
+/// Role name in a PermsChanged row: banned is checked first, then admin and moderator by bit;
 /// everything else reads «User» (not `role_of`, which also knows owner and read-only).
 fn perms_change_name(perms: i32, lang: Lang) -> &'static str {
     let role = if perms & 0x01 != 0 { Role::Banned } else if perms & 0x40 != 0 { Role::Admin } else if perms & 0x20 != 0 { Role::Mod } else { Role::User };
@@ -130,7 +130,7 @@ fn system_pubkeys(data: &[u8]) -> Vec<Vec<u8>> {
     }
 }
 
-/// Text of a system row (AG §1.5 table); `None` for `MessageDeleted`, which is never shown (P2-R1).
+/// Text of a system row; `None` for `MessageDeleted`, which is never shown.
 pub fn system_text(data: &[u8], members: &Members, lang: Lang) -> Option<String> {
     let n = |k: &[u8]| members.name_for_key(k, lang);
     let f = |key, args: &[&str]| trf(lang, key, args);
@@ -150,7 +150,7 @@ pub fn system_text(data: &[u8], members: &Members, lang: Lang) -> Option<String>
     })
 }
 
-/// Rows a timeline or preview skips: reactions, and `MessageDeleted` notices (P2-R1).
+/// Rows a timeline or preview skips: reactions, and `MessageDeleted` notices.
 pub fn hidden(msg_type: i32, data: Option<&[u8]>) -> bool {
     msg_type == REACTION
         || msg_type == SYSTEM && matches!(parse_system_message(data.unwrap_or_default().to_vec()), Ok(SystemMessage::MessageDeleted { .. }))
@@ -174,7 +174,7 @@ pub fn group_to_stored(m: &StoredGroupMessage) -> StoredMessage {
     }
 }
 
-/// Mediator subscription of a group, from `get_group_chat_status` / `GroupChatStatus` (CG §1h, §2).
+/// Mediator subscription of a group, from `get_group_chat_status` / `GroupChatStatus`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum GroupStatus {
     #[default]
@@ -204,7 +204,7 @@ pub fn counts(app: &MimirApp, chat_id: i64) -> (i32, i32) {
     }
 }
 
-/// P2-R7: the core stores other members' ChatInfoChanged rows without applying them (CG §2). Writes the name,
+/// The core stores other members' ChatInfoChanged rows without applying them. Writes the name,
 /// description and avatar of those newer than row `after` into the local chat, oldest first, and returns the newest
 /// one's id.
 // ponytail: only the newest INFO_SCAN rows are looked at; a rename buried under more rows than that is missed.
@@ -212,14 +212,14 @@ pub fn apply_chat_info(app: &MimirApp, chat_id: i64, after: i64) -> Option<i64> 
     let mut newest = None;
     for m in app.get_group_messages(chat_id, 0, INFO_SCAN).iter().rev().filter(|m| m.system && m.id > after) {
         if let Ok(SystemMessage::ChatInfoChanged { name, description, avatar, .. }) = parse_system_message(m.data.clone().unwrap_or_default()) {
-            // ponytail: storage-only single-row writes on the UI thread (ruling PF-2); a failure keeps the old name.
+            // ponytail: storage-only single-row writes on the UI thread; a failure keeps the old name.
             if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
                 let _ = app.update_group_chat_name(chat_id, name);
             }
             if let Some(d) = description {
                 let _ = app.update_group_chat_description(chat_id, d);
             }
-            // ponytail: empty avatar bytes are skipped, not taken as «removed» (CA open question 8).
+            // ponytail: empty avatar bytes are skipped, not taken as «removed».
             if let Some(a) = avatar.filter(|a| !a.is_empty()) {
                 let _ = app.update_group_chat_avatar(chat_id, a);
             }
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(ru(body(0x05, &[&pk(2)])).as_deref(), Some("Митя удалил(а) чат"));
         assert_eq!(ru(body(0x07, &[&pk(1), &[0x40], &pk(2)])).as_deref(), Some("Митя изменил(а) роль Аня на Админ"));
         assert_eq!(ru(body(0x07, &[&pk(1), &[0x01], &pk(2)])).as_deref(), Some("Митя изменил(а) роль Аня на забанен"));
-        // AG §1.5: banned wins, then admin, moderator; owner/read-only/anything else reads «User».
+        // Banned wins, then admin, moderator; owner/read-only/anything else reads «User».
         let role = |perms: u8| ru(body(0x07, &[&pk(1), &[perms], &pk(2)])).unwrap();
         assert!(role(0x41).ends_with("на забанен"), "ban bit first");
         assert!(role(0x20).ends_with("на Модератор"));
@@ -314,7 +314,7 @@ mod tests {
         let mut deleted = vec![0x08];
         deleted.extend(5i64.to_be_bytes());
         deleted.extend(pk(2));
-        assert_eq!(ru(deleted), None, "MessageDeleted is never shown (P2-R1)");
+        assert_eq!(ru(deleted), None, "MessageDeleted is never shown");
         assert_eq!(system_text(&body(0x03, &[&pk(1)]), &m, Lang::En).as_deref(), Some("Аня left the chat"));
     }
 
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn others_avatar_change_is_applied() {
-        // M9: a member's ChatInfoChanged with an avatar (TLV 0x22) updates our copy of the group avatar.
+        // A member's ChatInfoChanged with an avatar (TLV 0x22) updates our copy of the group avatar.
         let (_t, app, _) = members();
         let png = crate::test_support::png_bytes(2, 2, [1, 2, 3]);
         assert!(png.len() < 128, "one-byte TLV length");

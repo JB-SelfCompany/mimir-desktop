@@ -1,4 +1,13 @@
-Copyright 2013 Google LLC
+Bundled fonts, all licensed under the SIL Open Font License, Version 1.1 (copied below):
+
+NotoSans-Regular.ttf, NotoSans-Bold.ttf, NotoSans-Italic.ttf, NotoSans-BoldItalic.ttf (Noto Sans)
+  Copyright 2015 Google Inc. All Rights Reserved.
+
+NotoSansMono.ttf (Noto Sans Mono)
+  Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+
+Noto-COLRv1.ttf (Noto Color Emoji, COLRv1)
+  Copyright 2022 Google Inc.
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

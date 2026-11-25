@@ -1,7 +1,8 @@
 //! Group info panel (Android GroupInfoActivity): header, actions by role, description, invite link, and the members
 //! with their roles and the owner/admin member menu; plus the group's ⋮ menu and its dialogs.
 //! Mediator calls (leave, delete, invite, role, edit) run on the worker as a `GroupOp`; only their real results are
-//! reported (P2-R12). Mute, clear history and the local delete of a read-only chat are storage-only and stay inline.
+//! reported. Clear history and the local delete of a read-only chat write many rows, so they run there too;
+//! mute is a single-row write and stays inline.
 use crate::{
     app::MimirDesktop,
     core::worker::WorkResult,
@@ -27,7 +28,7 @@ use eframe::egui::{
     self, vec2, Align, Button, Color32, FontFamily, FontId, Id, Label, Layout, Popup, Response, RichText, Sense, SetOpenCommand,
     Spinner, TextureHandle, Ui, UiBuilder,
 };
-use crate::media::{avatar::{resolve, AvatarError, GROUP_MAX}, thumbs::ThumbCache};
+use crate::media::{avatar::{resolve, GROUP_MAX}, thumbs::ThumbCache};
 use mimir::{MemberUpdate, MimirApp, StoredGroupChat, StoredMember};
 use std::path::Path;
 
@@ -36,8 +37,12 @@ use std::path::Path;
 pub enum GroupOp {
     Leave(i64),
     Delete(i64),
+    /// The local-only delete of a read-only chat.
+    DeleteLocal(i64),
+    /// Deletes the chat's messages and their attachment files (a bare file name inside `files_dir`).
+    ClearHistory { chat_id: i64, files_dir: std::path::PathBuf },
     Invite { chat_id: i64, pubkey: Vec<u8>, name: String },
-    /// `perms`: 0x10 user, 0x20 moderator, 0x40 admin, 0x01 banned (P2-R4: a ban is a role change).
+    /// `perms`: 0x10 user, 0x20 moderator, 0x40 admin, 0x01 banned (a ban is a role change).
     SetRole { chat_id: i64, pubkey: Vec<u8>, perms: u8, name: String },
     /// Only the fields that changed are `Some`; `avatar` is a newly picked one.
     UpdateInfo { chat_id: i64, name: Option<String>, description: Option<String>, avatar: Option<Vec<u8>> },
@@ -49,6 +54,11 @@ impl GroupOp {
         let r = match self {
             GroupOp::Leave(chat_id) => core.leave_group(chat_id).map(|_| WorkResult::Left { chat_id }).map_err(failed("leave_group")),
             GroupOp::Delete(chat_id) => core.delete_group(chat_id).map(|_| WorkResult::GroupDeleted { chat_id }).map_err(failed("delete_group")),
+            GroupOp::DeleteLocal(chat_id) => core.delete_group_chat(chat_id).map(|_| WorkResult::GroupDeleted { chat_id }).map_err(failed("delete_group_chat")),
+            GroupOp::ClearHistory { chat_id, files_dir } => {
+                crate::media::remove_attachment_files(&files_dir, &core.clear_group_chat_history(chat_id));
+                Ok(WorkResult::HistoryCleared { chat_id })
+            }
             GroupOp::Invite { chat_id, pubkey, name } => {
                 core.invite_to_group(chat_id, pubkey).map(|_| WorkResult::Invited { name }).map_err(failed("invite_to_group"))
             }
@@ -68,7 +78,9 @@ impl GroupOp {
 fn submit(app: &mut MimirDesktop, op: GroupOp) {
     #[cfg(test)]
     app.state.group_ui.submitted.push(op.clone());
-    app.group_worker.submit(Box::new(move |core| op.run(core)));
+    // Storage-only jobs must not queue behind mediator calls (dial and request timeouts).
+    let worker = if matches!(op, GroupOp::DeleteLocal(_) | GroupOp::ClearHistory { .. }) { &app.worker } else { &app.group_worker };
+    worker.submit(Box::new(move |core| op.run(core)));
 }
 
 /// The stored chat and its members as the panel shows them; re-read when the chat or its members change.
@@ -136,7 +148,7 @@ enum Act {
     Invite,
 }
 
-/// Our role from our own member row (AG §5.9); before the first member sync, the stored owner key.
+/// Our role from our own member row; before the first member sync, the stored owner key.
 fn my_role(members: &[StoredMember], me: &[u8], owner: &[u8]) -> Role {
     match members.iter().find(|m| m.pubkey == me) {
         Some(m) => role_of(m.permissions),
@@ -145,7 +157,7 @@ fn my_role(members: &[StoredMember], me: &[u8], owner: &[u8]) -> Role {
     }
 }
 
-/// Online first, then the owner, then admins and moderators, then by name (AG §1.6).
+/// Online first, then the owner, then admins and moderators, then by name.
 fn sort_members(members: &mut [StoredMember]) {
     let rank = |m: &StoredMember| match role_of(m.permissions) {
         Role::Owner => 0,
@@ -178,7 +190,7 @@ fn row_info(app: &MimirDesktop, id: i64) -> Option<(String, GroupRowInfo, bool)>
     Some((r.name.clone(), g, g.read_only || status_ro))
 }
 
-/// The invite link of a public chat (AG §1.6); `None` without a 32-byte mediator key and shared key.
+/// The invite link of a public chat; `None` without a 32-byte mediator key and shared key.
 fn invite_link(chat: &StoredGroupChat) -> Option<String> {
     let kind = if chat.is_channel { LinkKind::Channel } else { LinkKind::Group };
     let l = GroupLink { kind, mediator: chat.mediator_pubkey.clone().try_into().ok()?, chat_id: chat.chat_id, key: chat.shared_key.clone().try_into().ok()? };
@@ -208,7 +220,7 @@ pub fn contents(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette, id: i64) {
     let (thumbs, data_dir) = (&mut app.state.thumbs, app.paths.core_dir.as_path());
     let close = panel_frame(ui, p, lang, |ui| {
         ui.vertical_centered(|ui| {
-            // AM §9: 128 px, corner 8, in group info.
+            // 128 px, corner 8, in group info.
             let path = resolve(data_dir, &c.chat.avatar);
             avatar::show(ui, thumbs, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 128., 4.);
             ui.label(RichText::new(&name).font(FontId::new(15., FontFamily::Name("bold".into()))).color(p.text));
@@ -290,7 +302,7 @@ fn member_row(ui: &mut Ui, p: &Palette, lang: Lang, m: &StoredMember, manage: bo
         .push_id(&m.pubkey, |ui| {
             ui.scope_builder(UiBuilder::new().sense(if manage { Sense::click() } else { Sense::hover() }), |ui| {
                 ui.horizontal(|ui| {
-                    // AM §9: 48 px in the member list.
+                    // 48 px in the member list.
                     let path = resolve(data_dir, &m.avatar);
                     avatar::show(ui, thumbs, path.as_deref(), avatar_color(&m.pubkey), 48., 3.);
                     ui.vertical(|ui| {
@@ -347,7 +359,7 @@ fn act(app: &mut MimirDesktop, id: i64, a: Act, info: GroupRowInfo, stored: (Str
             return;
         }
         Act::Mute => {
-            // Storage-only single-row write (ruling PF-2); an error leaves the toggle as it was.
+            // Storage-only single-row write; an error leaves the toggle as it was.
             if let Err(e) = app.core.set_group_chat_muted(id, !info.muted) {
                 app.error_text(format!("set_group_chat_muted: {e}"));
             }
@@ -415,9 +427,9 @@ pub fn closed(app: &mut MimirDesktop, id: i64) {
     }
 }
 
-/// Our own role change or ban went through. The mediator does not echo it to the actor (CG; upstream
-/// `change_member_role` writes nothing locally), so the member row is written here: a storage-only single-row write
-/// (ruling PF-2). A ban is the soft "gone" of the core's own `ban_member`: the member leaves `get_members` but still
+/// Our own role change or ban went through. The mediator does not echo it to the actor (upstream
+/// `change_member_role` writes nothing locally), so the member row is written here: a storage-only single-row write.
+/// A ban is the soft "gone" of the core's own `ban_member`: the member leaves `get_members` but still
 /// names their old messages. Then the members are re-read.
 pub fn member_changed(app: &mut MimirDesktop, chat_id: i64, pubkey: &[u8], perms: u8) {
     // ponytail: a failed local write only leaves the old role shown until the next member sync.
@@ -436,7 +448,7 @@ pub fn member_changed(app: &mut MimirDesktop, chat_id: i64, pubkey: &[u8], perms
 
 /// A failed mediator call of a confirmed dialog closes it (the status line says why).
 pub fn op_failed(app: &mut MimirDesktop, what: &str) {
-    if matches!(what, "leave_group" | "delete_group" | "change_member_role") {
+    if matches!(what, "leave_group" | "delete_group" | "delete_group_chat" | "change_member_role") {
         op_done(app);
     }
 }
@@ -448,14 +460,6 @@ fn op_done(app: &mut MimirDesktop) {
         g.busy = false;
         g.dialog = None;
     }
-}
-
-/// A group avatar that could not be used (AM §9 texts).
-pub(crate) fn avatar_error(e: AvatarError, lang: Lang) -> &'static str {
-    tr(lang, match e {
-        AvatarError::TooLarge => Key::AvatarTooLarge,
-        AvatarError::Unreadable => Key::ErrorLoadingImage,
-    })
 }
 
 /// True while the edit dialog waits for `update_group_info`.
@@ -488,38 +492,24 @@ pub fn edit_done(app: &mut MimirDesktop, id: i64) {
     app.notice(Key::ChatInfoUpdated);
 }
 
-/// Deletes the chat's messages and their attachment files (storage-only, inline like the 1:1 clear).
-fn clear_history(app: &mut MimirDesktop, id: i64) {
-    for f in app.core.clear_group_chat_history(id) {
-        // Only a bare file name is accepted: a stored name must not reach outside the files folder.
-        if let Some(name) = std::path::Path::new(&f).file_name() {
-            let _ = std::fs::remove_file(app.paths.files_dir.join(name));
-        }
-    }
+/// The worker cleared the chat's history: reload what the open chat shows and close the dialog.
+pub fn history_cleared(app: &mut MimirDesktop, id: i64) {
     if let Some(chat) = app.state.open_chat.as_mut().filter(|c| c.key == ChatKey::Group(id)) {
         chat.timeline = Timeline::open(&app.core, chat.key);
         chat.reactions.clear();
         chat.day_key = (usize::MAX, 0, 0);
     }
+    app.state.chats = build_chat_list(&app.core, app.lang);
+    op_done(app);
 }
 
-/// Runs a confirmed dialog: storage-only actions at once; a mediator call is returned for the caller to submit.
+/// Runs a confirmed dialog: the job to hand to the worker, if the confirmation has one.
 fn apply(app: &mut MimirDesktop, id: i64, d: &Dialog) -> Option<GroupOp> {
     let op = match d {
         Dialog::Leave => Some(GroupOp::Leave(id)),
         Dialog::Delete => Some(GroupOp::Delete(id)),
-        Dialog::DeleteLocal => {
-            // ponytail: storage-only local delete on the UI thread, as Android does (AG §4).
-            match app.core.delete_group_chat(id) {
-                Ok(()) => closed(app, id),
-                Err(e) => app.error_text(format!("delete_group_chat: {e}")),
-            }
-            None
-        }
-        Dialog::Clear => {
-            clear_history(app, id);
-            None
-        }
+        Dialog::DeleteLocal => Some(GroupOp::DeleteLocal(id)),
+        Dialog::Clear => Some(GroupOp::ClearHistory { chat_id: id, files_dir: app.paths.files_dir.clone() }),
         Dialog::Ban { pubkey, name } => Some(GroupOp::SetRole { chat_id: id, pubkey: pubkey.clone(), perms: 0x01, name: name.clone() }),
         Dialog::Role { pubkey, name, current, pick } => (pick != current).then(|| {
             let perms = match pick {
@@ -639,7 +629,7 @@ fn edit_dialog(app: &mut MimirDesktop, ctx: &egui::Context, id: i64, channel: bo
     let (lang, started) = (app.lang, app.state.core_started);
     if let Some((_, Dialog::Edit(d))) = &mut app.state.group_ui.dialog {
         if let Some(e) = d.avatar.poll(ctx) {
-            d.error = Some(avatar_error(e, lang).to_string());
+            d.error = Some(avatar::error_text(e, lang).to_string());
         }
     }
     let (mut save, mut cancel) = (false, false);
@@ -893,7 +883,7 @@ mod tests {
         h.run_steps(3);
         assert_eq!(submitted(&h).len(), 1);
 
-        // No echo from the mediator (F-P2-1): the result itself updates the member.
+        // No echo from the mediator: the result itself updates the member.
         tx.send(Event::WorkDone(WorkResult::RoleChanged { chat_id: 7, pubkey: ANYA.to_vec(), perms: 0x20, name: "Аня".into() })).unwrap();
         h.run();
         assert!(h.query_by_label("Изменить роль Аня").is_none(), "the result closes the dialog");
@@ -1076,7 +1066,7 @@ mod tests {
         h.state().core.update_group_chat_description(7, "Наша семья!".into()).unwrap(); // what the core writes on success
         tx.send(Event::WorkDone(WorkResult::GroupInfoUpdated { chat_id: 7 })).unwrap();
         h.run();
-        assert!(h.query_by_label("Изменить данные группы").is_none(), "the result closes the dialog (AG §5.1)");
+        assert!(h.query_by_label("Изменить данные группы").is_none(), "the result closes the dialog");
         assert_eq!(status(&h).as_deref(), Some("Данные чата изменены!"));
         assert!(in_panel(&h, "Наша семья!"));
 
@@ -1099,7 +1089,7 @@ mod tests {
 
     #[test]
     fn own_rename_survives_restart() {
-        // Carry-over m2: our own update_group_info is not echoed, so after a restart the older ChatInfoChanged
+        // Our own update_group_info is not echoed, so after a restart the older ChatInfoChanged
         // of another member must not be applied again over it.
         let (mut h, tx) = group(OWNER, 0, "");
         let core = h.state().core.clone();
@@ -1147,7 +1137,7 @@ mod tests {
         h.run();
         assert!(h.query_by_label("Добавить участника").is_none());
         assert_eq!(submitted(&h), [GroupOp::Invite { chat_id: 7, pubkey: vec![8; 32], name: "Вера".into() }]);
-        assert_eq!(status(&h), None, "not optimistic (P2-R12)");
+        assert_eq!(status(&h), None, "not optimistic");
         tx.send(Event::WorkDone(WorkResult::Invited { name: "Вера".into() })).unwrap();
         h.run();
         assert_eq!(status(&h).as_deref(), Some("Приглашение отправлено: Вера"));
@@ -1201,7 +1191,7 @@ mod tests {
 
     #[test]
     fn read_only_delete_is_local() {
-        let (mut h, _) = group(USER, 0, "");
+        let (mut h, tx) = group(USER, 0, "");
         let core = h.state().core.clone();
         core.set_group_chat_read_only(7, true).unwrap();
         h.state_mut().state.chats = build_chat_list(&core, Lang::Ru);
@@ -1213,15 +1203,34 @@ mod tests {
         h.run();
         assert!(h.query_by_label("Удалить этот чат с устройства?").is_some());
         h.get_all_by_label("Удалить").last().unwrap().click();
+        // The job runs on the real worker (its result goes to the replaced channel): wait for the write, then deliver it.
+        crate::test_support::run_until(&mut h, "local delete", |_| core.get_group_chat(7).is_none());
+        assert!(h.query_by_label("Удалить этот чат с устройства?").is_some(), "the dialog waits for the result");
+        tx.send(Event::WorkDone(WorkResult::GroupDeleted { chat_id: 7 })).unwrap();
         h.run();
-        assert!(core.get_group_chat(7).is_none());
         assert_eq!(h.state().state.selected, None);
-        assert!(submitted(&h).is_empty(), "no network call");
+        assert_eq!(submitted(&h), [GroupOp::DeleteLocal(7)], "a local job only: no mediator call");
+    }
+
+    #[test]
+    fn local_group_jobs_do_not_wait_behind_mediator_calls() {
+        let (mut h, _tx) = group(OWNER, 0, "");
+        let core = h.state().core.clone();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        // A slow mediator call holds the group lane.
+        h.state().group_worker.submit(Box::new(move |_| {
+            let _ = gate.recv();
+            WorkResult::Done
+        }));
+        core.add_group_message(7, 2, 12, ANYA.to_vec(), now_ms(), 0, false, b"hello".to_vec(), 0, false).unwrap();
+        submit(h.state_mut(), GroupOp::ClearHistory { chat_id: 7, files_dir: std::env::temp_dir() });
+        crate::test_support::run_until(&mut h, "history cleared", |_| core.get_group_messages(7, 0, 10).is_empty());
+        let _ = release.send(());
     }
 
     #[test]
     fn mute_and_clear() {
-        let (mut h, _) = group(OWNER, 0, "");
+        let (mut h, tx) = group(OWNER, 0, "");
         let core = h.state().core.clone();
         h.get_by_label("Без звука").click();
         h.run();
@@ -1244,9 +1253,11 @@ mod tests {
         assert!(h.query_by_label("hello").is_some(), "not before confirm");
         assert_eq!(button_fill(&h, "OK"), Some(crate::ui::theme::palette(true).danger));
         h.get_by_label("OK").click();
+        crate::test_support::run_until(&mut h, "history cleared", |_| core.get_group_messages(7, 0, 10).is_empty() && !files.join("a.jpg").exists());
+        assert!(h.query_by_label("hello").is_some(), "the view reloads on the result");
+        tx.send(Event::WorkDone(WorkResult::HistoryCleared { chat_id: 7 })).unwrap();
         h.run();
         assert!(h.query_by_label("hello").is_none());
-        assert!(core.get_group_messages(7, 0, 10).is_empty());
-        assert!(!files.join("a.jpg").exists(), "attachment file deleted");
+        assert!(h.query_by_label("Очистить историю").is_none(), "dialog closed");
     }
 }

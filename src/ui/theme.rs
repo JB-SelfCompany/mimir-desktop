@@ -17,6 +17,8 @@ pub struct Palette {
     pub danger: Color32,
     /// File bubble icon box (Android file_icon_background: semi_gray / light_gray).
     pub file_icon: Color32,
+    /// The selected chat-list row.
+    pub selected: Color32,
 }
 
 const fn rgb(c: u32) -> Color32 {
@@ -38,6 +40,7 @@ pub fn palette(dark: bool) -> Palette {
         text_dim: pick(0xA0A0A0, 0x606060),
         danger: rgb(0xF44336),
         file_icon: pick(0x404040, 0xE0E0E0),
+        selected: pick(0x2A2A2A, 0xE6E6E6),
     }
 }
 

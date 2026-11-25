@@ -1,4 +1,4 @@
-//! The settings sections with no worker jobs: receive, images, priority, voice, font, appearance, about (AS §1.2-1.6).
+//! The settings sections with no worker jobs: receive, images, priority, voice, font, appearance, about.
 use super::{commit, row_title, save};
 use crate::{
     app::{theme_preference, MimirDesktop},
@@ -9,7 +9,7 @@ use crate::{
 };
 use eframe::egui::{self, vec2, Button, ComboBox, CornerRadius, FontFamily, FontId, Frame, OpenUrl, Rect, RichText, Role, Sense, Shape, Slider, Stroke, TextEdit, WidgetInfo};
 
-/// Auto-download caps (AS §1.2): 0 never, -1 always, else up to that many bytes.
+/// Auto-download caps: 0 never, -1 always, else up to that many bytes.
 const CAPS: [(i64, Key); 5] = [
     (0, Key::DownloadNever),
     (1 << 20, Key::DownloadUpTo1Mb),
@@ -90,7 +90,7 @@ pub fn priority(app: &mut MimirDesktop, ui: &mut egui::Ui) {
         apply |= ui.add(primary_button(&p, tr(lang, Key::Save))).clicked();
     });
     if apply {
-        // Android: trim, toIntOrNull, coerceIn(1, 100), else 1 (AS §1.4).
+        // Android: trim, toIntOrNull, coerceIn(1, 100), else 1.
         let v = app.state.settings_ui.priority.trim().parse::<i64>().map_or(1, |v| v.clamp(1, 100)) as u8;
         app.settings.priority = v;
         app.state.settings_ui.priority = v.to_string();

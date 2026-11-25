@@ -8,7 +8,7 @@ use crate::{
 use eframe::egui;
 use mimir::MimirApp;
 use notify_rust::NotificationResponse;
-use std::{sync::{atomic::{AtomicU64, Ordering}, mpsc::Sender}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, mpsc::Sender}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 
 /// Android's message alert (PCM WAV).
 const ALERT: &[u8] = include_bytes!("../../assets/sounds/message_alert.wav");
@@ -23,6 +23,9 @@ const RING_GAP: Duration = Duration::from_secs(60);
 
 /// When the alert last played (ms since the epoch).
 static LAST_ALERT: AtomicU64 = AtomicU64::new(0);
+/// Toasts waited on for a click at once, each on a thread of its own.
+const MAX_WAITING: usize = 8;
+static WAITING: AtomicUsize = AtomicUsize::new(0);
 
 /// What the window shows, written by the app on each frame (and `focused = false` when it hides).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,17 +101,30 @@ fn claim_alert(last: &AtomicU64, now_ms: u64) -> bool {
     now_ms.saturating_sub(prev) >= ALERT_GAP_MS && last.compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed).is_ok()
 }
 
+/// Whether one more toast may be waited on (then it counts in `waiting` until its wait ends).
+fn claim_waiter(waiting: &AtomicUsize) -> bool {
+    if waiting.fetch_add(1, Ordering::Relaxed) < MAX_WAITING {
+        return true;
+    }
+    waiting.fetch_sub(1, Ordering::Relaxed);
+    false
+}
+
 /// The toast and the alert sound, on a thread of their own (both can block). The thread then waits for the toast to be
-/// clicked (the window comes back) or closed. ponytail: a toast the OS never reports closed keeps its thread.
-pub fn show(title: String, body: String, tx: Sender<Event>, ctx: egui::Context) {
+/// clicked (the window comes back) or closed. `lang`: the click action's label.
+/// ponytail: a toast the OS never reports closed keeps its thread; past `MAX_WAITING` such threads a new toast is not
+/// waited on, and a click on it does nothing.
+pub fn show(title: String, body: String, lang: Lang, tx: Sender<Event>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut n = notify_rust::Notification::new();
         n.appname("Mimir").summary(&title).body(&body);
         #[cfg(windows)]
         n.app_id(APP_ID);
-        // XDG servers report a body click only for a notification with a "default" action (on Windows it is a button).
+        // XDG servers report a body click only for a notification with a "default" action; some show it as a button.
         #[cfg(target_os = "linux")]
-        n.action("default", "default");
+        n.action("default", tr(lang, Key::TrayOpen));
+        #[cfg(not(target_os = "linux"))]
+        let _ = lang;
         let shown = n.show();
         if let Err(e) = &shown {
             tracing::warn!("notification failed: {e}");
@@ -117,8 +133,11 @@ pub fn show(title: String, body: String, tx: Sender<Event>, ctx: egui::Context) 
         if claim_alert(&LAST_ALERT, now_ms) {
             play_alert();
         }
-        if let Ok(handle) = shown {
+        if let Ok(handle) = shown
+            && claim_waiter(&WAITING)
+        {
             let _ = handle.wait_for_response(|r: &NotificationResponse| clicked(r, &tx, &ctx));
+            WAITING.fetch_sub(1, Ordering::Relaxed);
         }
     });
 }
@@ -160,6 +179,15 @@ mod tests {
         assert!(claim_alert(&last, 10_000));
         assert!(!claim_alert(&last, 11_000), "within 1.5 s");
         assert!(claim_alert(&last, 11_500));
+    }
+
+    #[test]
+    fn waiting_toasts_capped() {
+        let waiting = AtomicUsize::new(0);
+        assert!((0..MAX_WAITING).all(|_| claim_waiter(&waiting)));
+        assert!(!claim_waiter(&waiting), "the next toast is not waited on");
+        waiting.fetch_sub(1, Ordering::Relaxed); // one was clicked or closed
+        assert!(claim_waiter(&waiting));
     }
 
     #[test]

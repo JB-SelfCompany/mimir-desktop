@@ -1,8 +1,8 @@
-//! Backup export and staged import (AS §2), in Android Mimir's zip layout so backups move between the two.
+//! Backup export and staged import, in Android Mimir's zip layout so backups move between the two.
 //!
 //! Export: a `backup_to` snapshot as `mimir.db`, the four avatar dirs under `mimir/`, the attachments under `files/`, the
-//! Android prefs XML and our own `shared_prefs/mimir_desktop.json` (P4-R2). Import is staged: `stage` copies the
-//! zip to `<root>/restore_pending.zip`, the app relaunches (P4-R1) and the next start runs `finish_pending` before the
+//! Android prefs XML and our own `shared_prefs/mimir_desktop.json`. Import is staged: `stage` copies the
+//! zip to `<root>/restore_pending.zip`, the app relaunches and the next start runs `finish_pending` before the
 //! core opens the files it replaces (a running core keeps `mimir.db` locked on Windows).
 use crate::{i18n::Lang, model::prefs_xml::{parse_prefs, write_prefs}, paths::DataPaths, settings::Settings};
 use mimir::MimirApp;
@@ -22,7 +22,7 @@ const SNAPSHOT: &str = "backup_snapshot.db";
 const PREFS_XML: &str = "shared_prefs/com.revertron.mimir_preferences.xml";
 const DESKTOP_JSON: &str = "shared_prefs/mimir_desktop.json";
 const AVATAR_DIRS: [&str; 4] = ["avatars", "group_avatars", "invite_avatars", "request_avatars"];
-/// What an import replaces, under the data root: Android deletes `mimir/` and `files/` (AS §2.2 step 5); our settings
+/// What an import replaces, under the data root: Android deletes `mimir/` and `files/`; our settings
 /// file stands in for its `shared_prefs/`.
 const SWAPPED: [&str; 3] = ["mimir", "files", "settings.json"];
 /// Written into `restore_old` once the backup's data is fully in place.
@@ -30,15 +30,15 @@ const SWAP_DONE: &str = ".swap_done";
 /// A finished swap's `restore_old`, renamed `restore_trash_<millis>` in one step: `recover` only ever deletes it.
 const TRASH: &str = "restore_trash_";
 /// Written once a backup's data is in place, removed after the copy got its own client id: a start that dies (or a
-/// regenerate that fails) in between retries at the next start (M1).
+/// regenerate that fails) in between retries at the next start.
 const REGENERATE: &str = ".regenerate_client_id";
-/// Locked (`File::try_lock`) while a start recovers or imports (I2): a second instance must not run `recover` against a
+/// Locked (`File::try_lock`) while a start recovers or imports: a second instance must not run `recover` against a
 /// swap in progress. The OS drops the lock when the process ends, killed or not; the file itself stays.
 const LOCK: &str = ".restore.lock";
-/// How long a rename keeps trying: right after the P4-R1 relaunch the old process may still hold `mimir.db`.
+/// How long a rename keeps trying: right after the relaunch the old process may still hold `mimir.db`.
 const RENAME_WAIT: Duration = Duration::from_secs(5);
 
-/// The desktop-only settings, `shared_prefs/mimir_desktop.json` (P4-R2).
+/// The desktop-only settings, `shared_prefs/mimir_desktop.json`.
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct DesktopPrefs {
@@ -47,7 +47,7 @@ struct DesktopPrefs {
     intro_done: bool,
 }
 
-/// Android's export file name (AS §2.1).
+/// Android's export file name.
 pub fn default_name() -> String {
     format!("mimir_backup_{}.zip", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis())
 }
@@ -129,7 +129,7 @@ fn clean(raw: &str) -> Option<&str> {
     (!escapes).then_some(name)
 }
 
-/// Android's whitelist (AS §2.2 step 3).
+/// Android's whitelist.
 fn known(name: &str) -> bool {
     name == "mimir.db" || name.starts_with("avatars_") || ["mimir", "files", "shared_prefs", "avatars"].iter().any(|d| name.strip_prefix(d).is_some_and(|r| r.is_empty() || r.starts_with('/')))
 }
@@ -165,7 +165,7 @@ pub fn stage(paths: &DataPaths, zip: &Path) -> Result<(), String> {
     })
 }
 
-/// Where a `clean` entry goes under `restore_tmp` (AS §2.2 step 6, legacy avatar dirs re-homed); `None`: skipped.
+/// Where a `clean` entry goes under `restore_tmp`; `None`: skipped.
 /// Built from its non-empty components, so `avatars//x` cannot turn into a rooted path on join.
 fn target(name: &str) -> Option<PathBuf> {
     let parts: Vec<&str> = name.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".").collect();
@@ -226,6 +226,10 @@ fn finish_pending(paths: &DataPaths) -> Result<bool, String> {
     if !pending.exists() {
         return result.map(|()| false);
     }
+    // A finished swap's restore_old that cannot go yet blocks the import: the staged zip waits for the next start.
+    if result.is_err() && !old_data_kept(&paths.root) {
+        return result.map(|()| true);
+    }
     let result = result.and_then(|()| apply(paths, &pending));
     let _ = fs::remove_file(&pending);
     let _ = fs::remove_dir_all(paths.root.join(TMP));
@@ -241,7 +245,7 @@ fn apply(paths: &DataPaths, pending: &Path) -> Result<(), String> {
         return Err("no mimir.db inside".into());
     }
     fs::create_dir_all(tmp.join("files")).map_err(text)?;
-    // Android replaces its prefs with the backup's (AS §2.2 step 5); lang and theme come from our own file, else stay.
+    // Android replaces its prefs with the backup's; lang and theme come from our own file, else stay.
     let mut settings = Settings::load(&paths.settings_file);
     settings.apply_android_prefs(&xml.map(|x| parse_prefs(&x)).unwrap_or_default());
     if let Some(d) = desktop.and_then(|j| serde_json::from_str::<DesktopPrefs>(&j).ok()) {
@@ -251,24 +255,56 @@ fn apply(paths: &DataPaths, pending: &Path) -> Result<(), String> {
     // Per-group bookkeeping of the replaced database.
     settings.chat_info_applied.clear();
     settings.save(&tmp.join("settings.json")).map_err(text)?;
+    // Every swapped entry exists before the swap, so restore_old gets one of each: a start that dies mid-swap then
+    // never keeps a backup entry beside the old data (an old install without files/ or settings.json).
+    for name in SWAPPED {
+        let live = root.join(name);
+        if !live.exists() {
+            if name == "settings.json" { Settings::load(&live).save(&live) } else { fs::create_dir_all(&live) }.map_err(text)?;
+        }
+    }
     fs::create_dir_all(&old).map_err(text)?;
     // After a rollback restore_old is empty and goes; when even the rollback failed it holds the old data and stays.
     swap(root, &tmp, &old).inspect_err(|_| drop(fs::remove_dir(&old)))?;
     // ponytail: if this write fails, only this start's `Ok(true)` makes the caller regenerate.
     let _ = fs::write(root.join(REGENERATE), "");
-    // Only now may restore_old go. Windows `remove_dir_all` can stop part-way (a file held open) after deleting the
-    // marker, so restore_old first becomes trash in one rename; a leftover trash dir goes at the next start.
-    // ponytail: if that rename fails too, only the marker tells `recover` the swap finished.
-    let _ = fs::write(old.join(SWAP_DONE), "");
+    // Only now may restore_old go. Marked first, so a start that dies next knows the swap finished.
+    let marked = mark_done(&old);
+    if let Err(e) = retire_old(root, &old) {
+        if let Err(m) = marked {
+            // Neither marked nor gone: the next start would take restore_old for an unfinished swap and put the old
+            // data back anyway. Done now, so this start opens what the next one would.
+            let _ = fs::remove_file(root.join(REGENERATE));
+            recover(root)?;
+            return Err(format!("{e}; marking it done failed ({m}): the old data is back"));
+        }
+    }
+    Ok(())
+}
+
+/// Writes the `SWAP_DONE` marker into `old`.
+fn mark_done(old: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_MARK.with(|f| f.get()) {
+        return Err(io::Error::other("disk full (test)"));
+    }
+    fs::write(old.join(SWAP_DONE), "")
+}
+
+/// Deletes a finished swap's restore_old. Windows `remove_dir_all` can stop part-way (a file held open) after deleting
+/// the marker, so it first becomes trash in one rename; a trash dir left over goes at the next start. When the rename
+/// fails restore_old stays where it is (still marked, if the marker could be written).
+fn retire_old(root: &Path, old: &Path) -> Result<(), String> {
     let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let trash = root.join(format!("{TRASH}{millis}"));
-    let _ = remove_old(if rename_retry(&old, &trash).is_ok() { &trash } else { &old });
+    rename_retry(old, &trash).map_err(|e| format!("{}: {e}", old.display()))?;
+    let _ = remove_old(&trash);
     Ok(())
 }
 
 /// Puts back old data that a swap left in `restore_old` (a start that died mid-swap, or a rollback that failed): each
 /// saved entry replaces whatever half-moved backup data is in its place. With the `SWAP_DONE` marker the swap had
-/// finished and restore_old is only deleted. On failure restore_old is kept, never deleted.
+/// finished and restore_old is only deleted (as trash, see `retire_old`). On failure restore_old is kept, never deleted.
 fn recover(root: &Path) -> Result<(), String> {
     for entry in fs::read_dir(root).into_iter().flatten().flatten() {
         if entry.file_name().to_string_lossy().starts_with(TRASH) {
@@ -279,24 +315,26 @@ fn recover(root: &Path) -> Result<(), String> {
     if !old.exists() {
         return Ok(());
     }
-    if !old.join(SWAP_DONE).exists() {
-        for name in SWAPPED {
-            let (saved, live) = (old.join(name), root.join(name));
-            if !saved.exists() {
-                continue;
-            }
-            if live.exists() {
-                let removed = if live.is_dir() { fs::remove_dir_all(&live) } else { fs::remove_file(&live) };
-                removed.map_err(|e| format!("{}: {e}; old data kept in {}", live.display(), old.display()))?;
-            }
-            rename_retry(&saved, &live).map_err(|e| format!("{}: {e}; old data kept in {}", saved.display(), old.display()))?;
+    if old.join(SWAP_DONE).exists() {
+        // An error keeps the import from starting: its swap would move live data in beside the marker.
+        return retire_old(root, &old);
+    }
+    for name in SWAPPED {
+        let (saved, live) = (old.join(name), root.join(name));
+        if !saved.exists() {
+            continue;
         }
+        if live.exists() {
+            let removed = if live.is_dir() { fs::remove_dir_all(&live) } else { fs::remove_file(&live) };
+            removed.map_err(|e| format!("{}: {e}; old data kept in {}", live.display(), old.display()))?;
+        }
+        rename_retry(&saved, &live).map_err(|e| format!("{}: {e}; old data kept in {}", saved.display(), old.display()))?;
     }
     fs::remove_dir_all(&old).map_err(text)
 }
 
 /// Unpacks the mapped entries into `tmp`; returns the Android prefs XML and our desktop JSON, if present. Other prefs files
-/// (Android's notification prefs, a lumio `settings.json`) are ignored (P4-R2).
+/// (Android's notification prefs, a lumio `settings.json`) are ignored.
 fn extract(zip: &Path, tmp: &Path) -> Result<(Option<String>, Option<String>), String> {
     let mut archive = open_zip(zip)?;
     let (mut xml, mut desktop) = (None, None);
@@ -329,6 +367,13 @@ fn extract(zip: &Path, tmp: &Path) -> Result<(Option<String>, Option<String>), S
     Ok((xml, desktop))
 }
 
+/// The old data is still in `restore_old` after `restore` failed: the core must not open (it would start a new,
+/// empty account where the old one belongs).
+pub fn old_data_kept(root: &Path) -> bool {
+    let old = root.join(OLD);
+    old.exists() && !old.join(SWAP_DONE).exists()
+}
+
 /// Moves the live `SWAPPED` entries into `old` and the extracted ones into place; on any failure undoes what was moved.
 fn swap(root: &Path, tmp: &Path, old: &Path) -> Result<(), String> {
     let (mut out, mut ins) = (vec![], vec![]);
@@ -347,6 +392,10 @@ fn swap(root: &Path, tmp: &Path, old: &Path) -> Result<(), String> {
             break;
         }
         ins.push(name);
+        #[cfg(test)]
+        if CRASH_AFTER.with(|c| c.get()) == Some(name) {
+            return Err("the process died (test)".into()); // no rollback
+        }
     }
     let Err(e) = result else { return Ok(()) };
     for name in ins {
@@ -389,6 +438,24 @@ thread_local! {
 #[cfg(test)]
 fn fail_cleanup(on: bool) {
     FAIL_CLEANUP.with(|f| f.set(on));
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_MARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CRASH_AFTER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam: writing the `SWAP_DONE` marker fails on this thread.
+#[cfg(test)]
+fn fail_mark(on: bool) {
+    FAIL_MARK.with(|f| f.set(on));
+}
+
+/// Test seam: the swap stops dead (no rollback) right after moving `name` in, as if the process were killed.
+#[cfg(test)]
+fn crash_after(name: Option<&'static str>) {
+    CRASH_AFTER.with(|c| c.set(name));
 }
 
 /// Deletes the old data of a finished swap.
@@ -739,6 +806,29 @@ mod tests {
     }
 
     #[test]
+    fn staged_import_waits_while_a_finished_swap_cannot_be_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = DataPaths::under(tmp.path());
+        fs::create_dir_all(&p.core_dir).unwrap();
+        fs::write(p.core_dir.join("mimir.db"), "old").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("b.zip");
+        zip_of(&zip, &[("mimir.db", b"first")]);
+        stage(&p, &zip).unwrap();
+        fail_rename(p.root.join(OLD));
+        assert_eq!(finish_pending(&p), Ok(true));
+        // A second import is staged while restore_old (marked) is still stuck.
+        zip_of(&zip, &[("mimir.db", b"second")]);
+        stage(&p, &zip).unwrap();
+        assert!(finish_pending(&p).is_err());
+        assert!(p.root.join(PENDING).exists(), "the staged zip is kept");
+        assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "first");
+        unlock_renames();
+        assert_eq!(finish_pending(&p), Ok(true));
+        assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "second");
+    }
+
+    #[test]
     fn failed_cleanup_after_swap_keeps_the_import() {
         let tmp = tempfile::tempdir().unwrap();
         let p = DataPaths::under(tmp.path());
@@ -755,6 +845,76 @@ mod tests {
         assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "new", "the import stays");
         // Unlocked, a later start deletes what is left.
         fail_cleanup(false);
+        assert_eq!(finish_pending(&p), Ok(false));
+        assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "new");
+        let names: Vec<_> = fs::read_dir(&p.root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert!(!names.iter().any(|n| n.starts_with("restore_")), "nothing left over: {names:?}");
+    }
+
+    #[test]
+    fn crash_mid_swap_never_mixes_backup_files_into_an_old_install() {
+        // The old install had no files/ and no settings.json; the start died once the backup's files/ was in place.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = DataPaths::under(tmp.path());
+        fs::create_dir_all(&p.core_dir).unwrap();
+        fs::write(p.core_dir.join("mimir.db"), "old").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("b.zip");
+        zip_of(&zip, &[("mimir.db", b"new"), ("files/new.txt", b"new")]);
+        stage(&p, &zip).unwrap();
+        crash_after(Some("files"));
+        assert!(finish_pending(&p).is_err());
+        crash_after(None);
+        assert!(old_data_kept(&p.root));
+        assert_eq!(finish_pending(&p), Ok(false), "the next start");
+        assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "old");
+        assert!(!p.files_dir.join("new.txt").exists(), "no backup file beside the old database");
+        assert_eq!(Settings::load(&p.settings_file), Settings::default());
+        assert!(leftovers(&p).is_empty() && !old_data_kept(&p.root));
+    }
+
+    #[test]
+    fn swap_neither_marked_nor_retired_is_undone_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = DataPaths::under(tmp.path());
+        fs::create_dir_all(&p.core_dir).unwrap();
+        fs::write(p.core_dir.join("mimir.db"), "old").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("b.zip");
+        zip_of(&zip, &[("mimir.db", b"new"), ("files/new.txt", b"new")]);
+        stage(&p, &zip).unwrap();
+        // The marker cannot be written and restore_old cannot become trash: the next start would undo the import.
+        fail_mark(true);
+        fail_rename(p.root.join(OLD));
+        let err = finish_pending(&p).unwrap_err();
+        fail_mark(false);
+        unlock_renames();
+        assert!(err.contains("the old data is back"), "{err}");
+        assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "old");
+        assert!(!p.files_dir.join("new.txt").exists());
+        assert!(!regenerate_pending(&p.root), "nothing imported");
+        assert!(leftovers(&p).is_empty() && !old_data_kept(&p.root));
+    }
+
+    #[test]
+    fn finished_swap_is_never_deleted_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = DataPaths::under(tmp.path());
+        fs::create_dir_all(&p.core_dir).unwrap();
+        fs::write(p.core_dir.join("mimir.db"), "old").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let zip = out.path().join("b.zip");
+        zip_of(&zip, &[("mimir.db", b"new")]);
+        stage(&p, &zip).unwrap();
+        // restore_old cannot become trash: it stays, marked, and the import stands.
+        fail_rename(p.root.join(OLD));
+        assert_eq!(finish_pending(&p), Ok(true));
+        assert!(p.root.join(OLD).join(SWAP_DONE).exists() && !old_data_kept(&p.root));
+        // Still locked at the next start: an error, but nothing deleted in place and the import kept.
+        assert!(finish_pending(&p).is_err());
+        assert_eq!(fs::read_to_string(p.root.join(OLD).join("mimir/mimir.db")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "new");
+        unlock_renames();
         assert_eq!(finish_pending(&p), Ok(false));
         assert_eq!(fs::read_to_string(p.core_dir.join("mimir.db")).unwrap(), "new");
         let names: Vec<_> = fs::read_dir(&p.root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();

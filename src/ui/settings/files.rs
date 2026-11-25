@@ -1,5 +1,5 @@
-//! The Files section (AS §3): what lies in `files/`, newest first, each row joined with its message's names and chat.
-//! Click opens the file (the Plan 3 safe-type rule), the ✕ deletes it after asking. The message stays (AS §3.3): its
+//! The Files section: what lies in `files/`, newest first, each row joined with its message's names and chat.
+//! Click opens the file (only safe file types open), the ✕ deletes it after asking. The message stays: its
 //! bubble just shows the attachment as not present. The listing runs on the worker when the section opens.
 use crate::{
     app::MimirDesktop,
@@ -17,7 +17,7 @@ use mimir::MimirApp;
 use crate::model::{attachment::AttachmentMeta, chat_list::SAVED_ID};
 use std::{collections::HashMap, fs, path::Path, time::SystemTime};
 
-/// One stored file: size and date come from the disk (AS §3.1), names and chat from the message that holds it.
+/// One stored file: size and date come from the disk, names and chat from the message that holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileRow {
     pub storage_name: String,
@@ -59,7 +59,7 @@ pub fn referenced(core: &MimirApp) -> HashMap<String, (String, String)> {
 }
 
 /// The regular files directly in `files_dir`, newest first. A file no message names (an orphan) keeps its disk name
-/// and has no chat. `.thumbs/` (a directory) and staged sends (`mimir_staged_*`) are not listed (P4-R4).
+/// and has no chat. `.thumbs/` (a directory) and staged sends (`mimir_staged_*`) are not listed.
 pub fn list_files(core: &MimirApp, files_dir: &Path) -> Vec<FileRow> {
     let items = referenced(core);
     let Ok(dir) = fs::read_dir(files_dir) else { return vec![] };
@@ -175,7 +175,7 @@ pub fn files(app: &mut MimirDesktop, ui: &mut egui::Ui) {
     }
 }
 
-/// «Удалить файл»: asks, then removes the file and its cached poster, and drops its row.
+/// «Удалить файл»: asks, then the worker removes the file and its cached poster; `deleted` drops its row.
 pub fn confirm(app: &mut MimirDesktop, ctx: &egui::Context) {
     let Some(r) = app.state.settings_ui.file_delete.clone() else { return };
     let lang = app.lang;
@@ -194,18 +194,26 @@ pub fn confirm(app: &mut MimirDesktop, ctx: &egui::Context) {
     if go {
         let path = app.paths.files_dir.join(&r.storage_name);
         let poster = app.paths.files_dir.join(".thumbs").join(format!("{}.jpg", r.storage_name));
-        // Already gone is fine; anything else (in use, no permission) keeps the row and says why.
-        let failed = [&path, &poster].into_iter().find_map(|p| fs::remove_file(p).err().filter(|e| e.kind() != std::io::ErrorKind::NotFound));
-        app.state.settings_ui.file_error = failed.map(|e| trf(lang, Key::DeleteFileFailed, &[&e.to_string()]));
-        if app.state.settings_ui.file_error.is_none() {
-            app.state.thumbs.invalidate(&path);
-            if let Some(rows) = &mut app.state.settings_ui.files {
-                rows.retain(|x| x.storage_name != r.storage_name);
-            }
-        }
+        let storage_name = r.storage_name.clone();
+        app.worker.submit(Box::new(move |_| {
+            // Already gone is fine; anything else (in use, no permission) keeps the row and says why.
+            let err = [&path, &poster].into_iter().find_map(|p| fs::remove_file(p).err().filter(|e| e.kind() != std::io::ErrorKind::NotFound));
+            WorkResult::FileDeleted { storage_name, err: err.map(|e| e.to_string()) }
+        }));
     }
     if go || cancel || res.should_close() {
         app.state.settings_ui.file_delete = None;
+    }
+}
+
+/// The worker deleted `storage_name` (its row goes), or says why it could not (the row stays).
+pub fn deleted(app: &mut MimirDesktop, storage_name: &str, err: Option<&String>) {
+    app.state.settings_ui.file_error = err.map(|e| trf(app.lang, Key::DeleteFileFailed, &[e]));
+    if err.is_none() {
+        app.state.thumbs.invalidate(&app.paths.files_dir.join(storage_name));
+        if let Some(rows) = &mut app.state.settings_ui.files {
+            rows.retain(|x| x.storage_name != storage_name);
+        }
     }
 }
 
@@ -311,6 +319,7 @@ mod tests {
         assert!(files.join("h.jpg").exists(), "nothing deleted before the answer");
         assert!(h.query_by_label("Удалить \"cat.jpg\"? Это нельзя отменить.").is_some());
         h.get_by_label("Удалить").click();
+        run_until(&mut h, "the delete", |h| h.state().state.settings_ui.files.as_ref().is_some_and(|f| f.is_empty()));
         h.run();
         assert!(!files.join("h.jpg").exists() && !files.join(".thumbs/h.jpg.jpg").exists(), "the file and its poster");
         assert_eq!(core.get_all_file_items().len(), 1, "the message stays");
@@ -333,6 +342,7 @@ mod tests {
         h.get_by_label("Удалить stray").click();
         h.run();
         h.get_by_label("Удалить").click();
+        run_until(&mut h, "the delete", |h| h.state().state.settings_ui.file_error.is_some());
         h.run();
         assert_eq!(h.state().state.settings_ui.files.as_ref().unwrap().len(), 1, "the row stays");
         assert!(h.query_by_label_contains("Не удалось удалить файл:").is_some(), "the error shows");

@@ -12,7 +12,7 @@ const TRACKERS: [&str; 2] = [
 const MEDIATOR: &str = "000096390fde19f30d3ba042d77f5f5ce0e6c23bd62ff0afc2e6c29a6fe96b33";
 
 /// Core config from `<core_dir>/config.json` (or the core's defaults), with attachments in our files dir, our
-/// auto-download caps (P3-R1; the core re-seeds them from here at start), priority and enabled peers (the settings
+/// auto-download caps (the core re-seeds them from here at start), priority and enabled peers (the settings
 /// own them, not config.json), and Android's trackers / mediator where the config names none.
 pub fn config_for(paths: &DataPaths, s: &Settings) -> AppConfig {
     let mut cfg = mimir::load_config(paths.core_dir.to_string_lossy().into_owned());

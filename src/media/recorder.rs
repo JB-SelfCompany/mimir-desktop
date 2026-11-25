@@ -1,15 +1,16 @@
-//! Microphone capture (LM §2): the default input device at its own rate and channel count, every sample as f32.
+//! Microphone capture: the default input device at its own rate and channel count, every sample as f32.
 //! The cpal stream is !Send, so it lives (and is dropped) on a thread of its own; the UI holds a \`Recorder\`.
 use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, FromSample, Sample, SampleFormat, SizedSample};
 use std::{
+    cell::RefCell,
     sync::{mpsc::{self, Receiver, RecvTimeoutError, Sender}, Arc, Mutex},
     time::{Duration, Instant},
 };
 
-/// Android's setMaxDuration(60000) and its 1000 ms minimum (AM §7).
+/// Android's setMaxDuration(60000) and its 1000 ms minimum.
 pub const MAX_MS: u64 = 60_000;
 pub const MIN_MS: u64 = 1_000;
-/// \`finish\`'s error for a take under a second (AM \`recording_too_short\`).
+/// \`finish\`'s error for a take under a second (Android \`recording_too_short\`).
 pub const TOO_SHORT: &str = "recording_too_short";
 /// The error when there is no input device (shown as «Микрофон не найден»).
 pub const NO_MIC: &str = "No microphone found";
@@ -32,7 +33,7 @@ pub struct Recorder {
     done: Receiver<Result<Recording, String>>,
     started: Instant,
     /// A capture error, once the thread reported it.
-    error: Mutex<Option<String>>,
+    error: RefCell<Option<String>>,
 }
 
 impl Recorder {
@@ -46,7 +47,7 @@ impl Recorder {
         let (ctl, ctl_rx) = mpsc::channel();
         let (tx, done) = mpsc::channel();
         std::thread::Builder::new().name("mic".into()).spawn(move || drop(tx.send(run(ctl_rx)))).map_err(|e| e.to_string())?;
-        Ok(Recorder { ctl, done, started, error: Mutex::new(None) })
+        Ok(Recorder { ctl, done, started, error: RefCell::new(None) })
     }
 
     pub fn elapsed_ms(&self) -> u64 {
@@ -55,7 +56,7 @@ impl Recorder {
 
     /// Why the capture stopped on its own (no device, device error), if it did.
     pub fn failed(&self) -> Option<String> {
-        let mut error = self.error.lock().unwrap();
+        let mut error = self.error.borrow_mut();
         // Before \`finish\` the thread only ever reports a failure.
         if let Ok(Err(e)) = self.done.try_recv() {
             *error = Some(e);
@@ -123,7 +124,7 @@ fn capture(ctl: Receiver<Ctl>) -> Result<Recording, String> {
 
 type Input = (Arc<Mutex<Vec<f32>>>, u32, u16, cpal::Stream);
 
-/// LM §2 open_input, with I32 (some WASAPI/ALSA devices) and the conversion done by cpal's FromSample.
+/// Opens the input stream, with I32 (some WASAPI/ALSA devices) and the conversion done by cpal's FromSample.
 fn open_input() -> Result<Input, String> {
     let device = cpal::default_host().default_input_device().ok_or(NO_MIC)?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;

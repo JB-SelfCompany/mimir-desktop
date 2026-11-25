@@ -1,4 +1,4 @@
-//! Off-thread image decoding into textures (AM §12.G): chat thumbnails, and a larger copy for the viewer.
+//! Off-thread image decoding into textures: chat thumbnails, and a larger copy for the viewer.
 use eframe::egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use std::{
     collections::HashMap,
@@ -9,6 +9,9 @@ use std::{
 
 /// Long edge of a chat thumbnail (Android createImagePreview).
 pub const THUMB_PX: u32 = 512;
+/// Textures kept at once (≤ 1 MiB each); past it the one drawn least recently goes. Never one drawn this frame: a list
+/// that draws more (every member row) keeps them all instead of decoding them again and again.
+const KEEP: usize = 128;
 
 #[derive(Clone)]
 pub enum Thumb {
@@ -22,11 +25,11 @@ pub enum Thumb {
 type Key = (PathBuf, u32, bool);
 type Decoded = (Key, Option<SystemTime>, Result<(ColorImage, [u32; 2]), String>);
 
-/// Textures by path and size cap, each tagged with the file mtime it was decoded from.
-// ponytail: chat thumbnails (≤ 1 MiB of texture each) are never evicted; every picture seen this session stays resident.
+/// Textures by path and size cap, each tagged with the file mtime it was decoded from and the egui pass (frame) it
+/// was last asked for in.
 #[derive(Default)]
 pub struct ThumbCache {
-    map: HashMap<Key, (Option<SystemTime>, Thumb)>,
+    map: HashMap<Key, (Option<SystemTime>, Thumb, u64)>,
     /// The decoder thread's job queue and results, started on first use.
     lane: Option<(Sender<(Key, Option<SystemTime>)>, Receiver<Decoded>)>,
 }
@@ -49,8 +52,10 @@ impl ThumbCache {
 
     fn get_key(&mut self, ctx: &Context, key: Key) -> Thumb {
         self.collect(ctx);
+        let pass = ctx.cumulative_pass_nr();
         let mtime = std::fs::metadata(&key.0).and_then(|m| m.modified()).ok();
-        if let Some((_, thumb)) = self.map.get(&key).filter(|(t, _)| *t == mtime) {
+        if let Some((_, thumb, used)) = self.map.get_mut(&key).filter(|(t, ..)| *t == mtime) {
+            *used = pass;
             return thumb.clone();
         }
         let thumb = if mtime.is_none() {
@@ -60,13 +65,19 @@ impl ThumbCache {
             let _ = jobs.send((key.clone(), mtime));
             Thumb::Loading
         };
-        self.map.insert(key, (mtime, thumb.clone()));
+        if self.map.len() >= KEEP && !self.map.contains_key(&key) {
+            let older = self.map.iter().filter(|(_, e)| e.2 < pass);
+            if let Some(oldest) = older.min_by_key(|(_, e)| e.2).map(|(k, _)| k.clone()) {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(key, (mtime, thumb.clone(), pass));
         thumb
     }
 
     /// Some image is still being decoded.
     pub fn loading(&self) -> bool {
-        self.map.values().any(|(_, t)| matches!(t, Thumb::Loading))
+        self.map.values().any(|(_, t, _)| matches!(t, Thumb::Loading))
     }
 
     /// Releases the `max`-capped texture of `path` (the viewer's large copy when it closes).
@@ -83,7 +94,7 @@ impl ThumbCache {
     #[cfg(test)]
     pub fn square_texture(&self, path: &Path, px: u32) -> Option<eframe::egui::TextureId> {
         match self.map.get(&(path.to_path_buf(), px, true)) {
-            Some((_, Thumb::Ready(t, _))) => Some(t.id()),
+            Some((_, Thumb::Ready(t, _), _)) => Some(t.id()),
             _ => None,
         }
     }
@@ -97,12 +108,11 @@ impl ThumbCache {
         let Some((_, done)) = &self.lane else { return };
         while let Ok((key, mtime, result)) = done.try_recv() {
             // A result for a file that changed (or was invalidated) since is dropped; a newer job follows.
-            if self.map.get(&key).is_some_and(|(t, thumb)| *t == mtime && matches!(thumb, Thumb::Loading)) {
-                let thumb = match result {
+            if let Some(entry) = self.map.get_mut(&key).filter(|(t, thumb, _)| *t == mtime && matches!(thumb, Thumb::Loading)) {
+                entry.1 = match result {
                     Ok((img, dims)) => Thumb::Ready(ctx.load_texture(key.0.to_string_lossy(), img, TextureOptions::LINEAR), dims),
                     Err(_) => Thumb::Failed,
                 };
-                self.map.insert(key, (mtime, thumb));
             }
         }
     }
@@ -187,9 +197,57 @@ mod tests {
         assert!(matches!(wait(&mut c, &ctx, &tmp.path().join("gone.png")), Thumb::Failed));
     }
 
+    /// The next egui pass (frame) of `ctx`.
+    fn next_frame(ctx: &Context) {
+        ctx.begin_pass(Default::default());
+        ctx.end_pass().textures_delta.clear(); // no painter here to upload them
+    }
+
+    #[test]
+    fn least_recently_drawn_goes_past_the_cap() {
+        // Missing files: each is an entry (Failed) without a decode; one per frame.
+        let (tmp, ctx) = (tempfile::tempdir().unwrap(), Context::default());
+        let p = |i: usize| tmp.path().join(format!("{i}.png"));
+        let mut c = ThumbCache::default();
+        for i in 0..KEEP {
+            next_frame(&ctx);
+            c.get(&ctx, &p(i));
+        }
+        next_frame(&ctx);
+        c.get(&ctx, &p(0)); // drawn again: now the most recent
+        next_frame(&ctx);
+        c.get(&ctx, &p(KEEP));
+        assert_eq!(c.map.len(), KEEP);
+        assert!(c.cached(&p(0), THUMB_PX) && c.cached(&p(KEEP), THUMB_PX));
+        assert!(!c.cached(&p(1), THUMB_PX), "the least recently drawn went");
+    }
+
+    #[test]
+    fn one_frame_drawing_more_than_the_cap_keeps_them_all() {
+        let (tmp, ctx) = (tempfile::tempdir().unwrap(), Context::default());
+        let n = KEEP + 1;
+        let p = |i: usize| tmp.path().join(format!("{i}.png"));
+        for i in 0..n {
+            std::fs::write(p(i), png(4, 4)).unwrap();
+        }
+        let mut c = ThumbCache::default();
+        let end = Instant::now() + Duration::from_secs(20);
+        // Every frame draws all of them (a long member list), as the UI does.
+        let ready = loop {
+            next_frame(&ctx);
+            let ready = (0..n).filter(|&i| matches!(c.get_square(&ctx, &p(i), 48), Thumb::Ready(..))).count();
+            if ready == n || Instant::now() > end {
+                break ready;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(ready, n, "every one decoded, none evicted while on screen");
+        assert!(!c.loading(), "the decoder goes idle");
+    }
+
     #[test]
     fn exif_orientation_is_applied() {
-        // I2: a 40×20 JPEG tagged Orientation=6 (a phone photo) shows upright, 20×40, in bubbles and the viewer.
+        // A 40×20 JPEG tagged Orientation=6 (a phone photo) shows upright, 20×40, in bubbles and the viewer.
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, p) = (Context::default(), tmp.path().join("phone.jpg"));
         let exif = [0x49, 0x49, 0x2A, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0];

@@ -1,11 +1,11 @@
-//! Avatars (AM §9, CA §6): a picked picture made into the square JPEG the core stores, stored paths resolved, and
+//! Avatars: a picked picture made into the square JPEG the core stores, stored paths resolved, and
 //! the picker that does both off the UI thread.
 use crate::media::stage::{flatten, open_oriented};
 use eframe::egui::{ColorImage, Context};
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType};
 use std::{path::{Path, PathBuf}, sync::mpsc::{self, Receiver}};
 
-/// Account avatar cap: contacts drop one over 50 KiB (CA §5).
+/// Account avatar cap: contacts drop one over 50 KiB.
 pub const ACCOUNT_MAX: usize = 48 << 10;
 /// Group avatar cap (Android MAX_AVATAR_SIZE).
 pub const GROUP_MAX: usize = 200 << 10;
@@ -37,7 +37,7 @@ pub fn prepare(src: &Path, max_bytes: usize) -> Result<Vec<u8>, AvatarError> {
     Err(AvatarError::TooLarge)
 }
 
-/// A stored avatar string (CA §0.6): relative to the core's `data_dir`, or a legacy absolute path; empty means none.
+/// A stored avatar string: relative to the core's `data_dir`, or a legacy absolute path; empty means none.
 pub fn resolve(data_dir: &Path, stored: &str) -> Option<PathBuf> {
     let p = Path::new(stored);
     (!stored.is_empty()).then(|| if p.is_absolute() { p.to_path_buf() } else { data_dir.join(p) })
@@ -65,7 +65,7 @@ pub fn set_picked(path: PathBuf) {
 
 #[cfg(not(test))]
 fn picker(filter: String) -> impl FnOnce() -> Option<PathBuf> + Send {
-    move || rfd::FileDialog::new().add_filter(filter, &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file()
+    move || crate::platform::file_dialog().add_filter(filter, &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file()
 }
 
 #[cfg(test)]

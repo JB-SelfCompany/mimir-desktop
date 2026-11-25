@@ -9,7 +9,18 @@ pub mod thumbs;
 use crate::{core::worker::{WorkResult, Worker}, i18n::{tr, Key, Lang}};
 use std::{ffi::OsString, path::{Path, PathBuf}};
 
-/// Extensions the OS default app may open directly (C1). The stored name is the sender's choice, so any other
+/// Deletes cleared attachments: each stored name is reduced to a bare file name inside `files_dir` (a stored name must
+/// not reach outside it), along with its video poster in `.thumbs`.
+pub fn remove_attachment_files(files_dir: &Path, names: &[String]) {
+    for name in names.iter().filter_map(|f| Path::new(f).file_name()) {
+        let _ = std::fs::remove_file(files_dir.join(name));
+        let mut poster = name.to_owned();
+        poster.push(".jpg");
+        let _ = std::fs::remove_file(files_dir.join(".thumbs").join(poster));
+    }
+}
+
+/// Extensions the OS default app may open directly. The stored name is the sender's choice, so any other
 /// file could be a program dressed up as a document: it is only shown in its folder.
 const SAFE_TO_OPEN: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "bmp", // images
@@ -22,7 +33,7 @@ fn safe_to_open(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| SAFE_TO_OPEN.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// Program and arguments that open `path` with the OS default app (P3-R8 as revised: not the web browser), or,
+/// Program and arguments that open `path` with the OS default app (not the web browser), or,
 /// for a type off the allowlist, reveal it in its folder (Windows: selected in Explorer).
 pub fn open_command(path: &Path) -> (&'static str, Vec<OsString>) {
     let prog = if cfg!(windows) { "explorer.exe" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
@@ -87,12 +98,12 @@ pub fn open_file(worker: &Worker, lang: Lang, path: &Path) {
     }
 }
 
-/// «Сохранить»: asks where with rfd and copies there (P3-R8); the result reaches the status line through `worker`.
+/// «Сохранить»: asks where with rfd and copies there; the result reaches the status line through `worker`.
 pub fn save_as(worker: &Worker, lang: Lang, src: PathBuf, name: String) {
     let worker = worker.clone();
     // The dialog blocks until the user answers and the copy can be large: a thread of its own, so no lane waits.
     std::thread::spawn(move || {
-        let Some(dest) = rfd::FileDialog::new().set_file_name(name).save_file() else { return };
+        let Some(dest) = crate::platform::file_dialog().set_file_name(name).save_file() else { return };
         let result = copy_to(&src, &dest, lang);
         worker.submit(Box::new(move |_| result));
     });

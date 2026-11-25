@@ -1,4 +1,4 @@
-//! Android SharedPreferences XML (`shared_prefs/*.xml`, AS §2.1): a flat `<map>` of typed entries.
+//! Android SharedPreferences XML (`shared_prefs/*.xml`): a flat `<map>` of typed entries.
 use serde::{Deserialize, Serialize};
 use PrefValue::*;
 

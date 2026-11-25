@@ -1,4 +1,4 @@
-//! The attachment part of a message bubble (AM §5–§8): image thumbnail, file panel, voice player, video tile, download row.
+//! The attachment part of a message bubble: image thumbnail, file panel, voice player, video tile, download row.
 use crate::{
     i18n::{size_units, tr, Key, Lang},
     media::{ffmpeg::{Poster, Posters}, player::Player, thumbs::{Thumb, ThumbCache}},
@@ -26,7 +26,7 @@ const ICON: f32 = 40.;
 enum Block {
     /// A picture fitted into 240×360; `None` while it decodes (a neutral placeholder).
     Image { tex: Option<TextureHandle>, img: Vec2 },
-    /// The poster frame (P3-R6; none: the neutral tile) and the clip's length in ms.
+    /// The poster frame (none: the neutral tile) and the clip's length in ms.
     Video { poster: Option<TextureHandle>, ms: Option<u64> },
     Voice(Voice),
     /// File panel: icon box, bold name, size line. `open`: the file is on disk (a click opens it), else a click
@@ -103,7 +103,7 @@ pub fn prepare(ui: &Ui, guid: i64, msg_type: i32, meta: &AttachmentMeta, files_d
         Transfer::Idle => None,
     };
     let label = match (k, path.is_some()) {
-        // A voice message has no name to show (AM §12.A).
+        // A voice message has no name to show.
         (AttachmentKind::Image | AttachmentKind::Voice, false) => tr(lang, if downloading { Key::DownloadingFile } else { Key::DownloadFile }).to_string(),
         (AttachmentKind::Voice, true) => tr(lang, Key::VoiceMessage).to_string(),
         (AttachmentKind::Video, false) => tr(lang, Key::Video).to_string(),
@@ -200,7 +200,7 @@ impl Attachment {
                 let size_min = text_min + vec2(0., name.size().y + 2.);
                 painter.galley(text_min, name, p.text);
                 painter.galley(size_min, size, p.text);
-                // A click on a running download asks again (I6): one that never ends would otherwise leave the row
+                // A click on a running download asks again: one that never ends would otherwise leave the row
                 // stuck; the core dedupes P2P requests by guid.
                 // ponytail: on a group download that is really running, the retry queues a second fetch behind it.
                 let mut action = match (resp.clicked(), open) {
@@ -209,7 +209,7 @@ impl Attachment {
                     _ => None,
                 };
                 let mut resp = resp.on_hover_cursor(CursorIcon::PointingHand);
-                // Audio (AM §6): the icon box plays inline, the rest of the panel opens the file. Registered last: on top.
+                // Audio: the icon box plays inline, the rest of the panel opens the file. Registered last: on top.
                 if let Some(playing) = audio {
                     let play = ui.interact(icon, id.with("play"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
                     play.widget_info(|| WidgetInfo::labeled(Role::Button, true, tr(lang, if playing { Key::Pause } else { Key::Play })));
@@ -351,7 +351,7 @@ mod tests {
         let img = in_chat(&h, Role::Image, "Изображение");
         assert_eq!(img.len(), 1, "one picture");
         assert_eq!((img[0].width(), img[0].height()), (240., 160.), "240 px wide, aspect kept");
-        assert!(painted_text(&h, |t| t.contains("photo.jpg")).is_empty(), "no file name under the picture (AM §12.B)");
+        assert!(painted_text(&h, |t| t.contains("photo.jpg")).is_empty(), "no file name under the picture");
         // A tall picture is capped at 360 px.
         let (h, _) = row(1, &image_meta("", 1), Some(&encoded(400, 1200, image::ImageFormat::Png)));
         let img = in_chat(&h, Role::Image, "Изображение")[0];
@@ -422,8 +422,13 @@ mod tests {
         h.run();
         assert!(h.query_by_label_contains("Сохранить").is_some());
         h.get_by_label_contains("Удалить файл").click();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while path.exists() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.run();
+        }
         h.run();
-        assert!(!path.exists(), "file deleted");
+        assert!(!path.exists(), "file deleted (by the worker)");
         assert_eq!(h.state().state.open_chat.as_ref().unwrap().timeline.msgs.len(), 1, "message kept");
         h.get_by_role_and_label(Role::Button, name).click();
         h.run();
@@ -440,7 +445,11 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         h.get_by_label_contains("Удалить файл").click();
-        h.run();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state().state.status.is_none() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.run();
+        }
         assert!(path.exists());
         let (text, _) = h.state().state.status.clone().expect("error in the status line");
         assert!(text.starts_with("Удалить файл: ") && !h.state().state.status_ok, "{text}");
@@ -462,7 +471,7 @@ mod tests {
 
     #[test]
     fn stuck_download_can_be_retried() {
-        // I6: a transfer that never ends (peer gone mid-way, request ignored) must not leave the row dead.
+        // A transfer that never ends (peer gone mid-way, request ignored) must not leave the row dead.
         let (mut h, _) = row(1, &image_meta("", 3 * MIB), None);
         h.state_mut().state.transfers.insert(GUID, Transfer::Downloading { done: 1536, total: 3 * MIB });
         h.run();
@@ -507,7 +516,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         h.run();
-        assert!(poster.is_file(), "cached under files_dir/.thumbs (P3-R6)");
+        assert!(poster.is_file(), "cached under files_dir/.thumbs");
         assert!(!painted_text(&h, |t| t == "0:07").is_empty(), "the duration on the tile");
         let tile = in_chat(&h, Role::Button, "Видеосообщение")[0];
         let textured = h.output().shapes.iter().any(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() && r.rect == tile));
@@ -542,7 +551,7 @@ mod tests {
         std::fs::write(files.join("Ab3dEf7hIj9kLm1n.jpg"), encoded(1200, 800, image::ImageFormat::Jpeg)).unwrap();
         std::fs::write(files.join("Vc1.m4a"), std::fs::read(crate::media::player::tests::FIXTURE).unwrap()).unwrap();
         let now = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
-        let mut add = |guid: i64, msg_type: i32, data: &str| {
+        let add = |guid: i64, msg_type: i32, data: &str| {
             core.add_local_message(c, guid, 0, guid % 2 == 0, true, now - 100_000 + guid, 0, msg_type, data.as_bytes().to_vec()).unwrap()
         };
         let mut ids = vec![];
@@ -592,7 +601,7 @@ mod tests {
         assert_eq!(in_chat(&h, Role::Button, "Играть").len(), 1, "▶");
         assert_eq!(h.query_all_by_role(Role::ProgressIndicator).filter(|n| n.rect().left() > 250.).count(), 1, "progress bar");
         assert!(!painted_text(&h, |t| t == "0:02").is_empty(), "duration");
-        assert!(painted_text(&h, |t| t.contains("voice_message")).is_empty(), "no file name (AM §12.A)");
+        assert!(painted_text(&h, |t| t.contains("voice_message")).is_empty(), "no file name");
         assert!(h.query_by_label_contains("voice_message").is_none(), "not even in accessibility labels");
         // The bar of a message that is not loaded does not seek: the click plays from the start.
         h.get_by_role(Role::ProgressIndicator).click();
@@ -646,7 +655,7 @@ mod tests {
 
     #[test]
     fn disguised_program_is_revealed_not_run() {
-        // C1: the stored name is the sender's; «invoice.pdf» over Q.bat must not shell-execute.
+        // The stored name is the sender's; «invoice.pdf» over Q.bat must not shell-execute.
         let meta = r#"{"name":"Q.bat","originalName":"invoice.pdf","size":5,"mimeType":"application/pdf"}"#;
         let (mut h, path) = row(3, meta, Some(b"@echo"));
         h.get_by_role_and_label(Role::Button, "invoice.pdf").click();
@@ -664,7 +673,7 @@ mod tests {
 
     #[test]
     fn forward_resends_the_file() {
-        // I3: forwarding a picture re-sends the file as an attachment, not its preview text.
+        // Forwarding a picture re-sends the file as an attachment, not its preview text.
         let (mut h, path) = row(1, &image_meta("подпись", 1), Some(&encoded(60, 40, image::ImageFormat::Png)));
         h.state_mut().state.core_started = true; // sends wait for the core
         h.get_by_role_and_label(Role::Image, "Изображение").click_secondary();
