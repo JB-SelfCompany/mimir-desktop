@@ -210,7 +210,7 @@ pub fn contents(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette, id: i64) {
         ui.vertical_centered(|ui| {
             // AM §9: 128 px, corner 8, in group info.
             let path = resolve(data_dir, &c.chat.avatar);
-            avatar::show(ui, thumbs, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 128., 8.);
+            avatar::show(ui, thumbs, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 128., 4.);
             ui.label(RichText::new(&name).font(FontId::new(15., FontFamily::Name("bold".into()))).color(p.text));
             let (n, on) = (counts.0.to_string(), counts.1.to_string());
             let line = match (info.is_channel, counts.1 > 0) {
@@ -292,7 +292,7 @@ fn member_row(ui: &mut Ui, p: &Palette, lang: Lang, m: &StoredMember, manage: bo
                 ui.horizontal(|ui| {
                     // AM §9: 48 px in the member list.
                     let path = resolve(data_dir, &m.avatar);
-                    avatar::show(ui, thumbs, path.as_deref(), avatar_color(&m.pubkey), 48., 6.);
+                    avatar::show(ui, thumbs, path.as_deref(), avatar_color(&m.pubkey), 48., 3.);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 1.;
                         ui.horizontal(|ui| {

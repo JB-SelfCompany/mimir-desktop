@@ -1,6 +1,7 @@
 use eframe::egui;
-use mimir::{AppEventListener, CallStatus, GroupCallParticipant};
-use std::sync::mpsc::Sender;
+use crate::platform::notify::{decide, new_ring, Focus};
+use mimir::{AppEventListener, CallStatus, GroupCallParticipant, MimirApp};
+use std::sync::{mpsc::Sender, Arc, Mutex, Weak};
 
 use super::worker::WorkResult;
 
@@ -43,20 +44,51 @@ pub enum Event {
     ContactResponse { pubkey: Vec<u8>, accepted: bool },
     TrackerAnnounce { ok: bool, ttl: i32 },
     WorkDone(WorkResult),
+    /// Another launch forwarded a link or asked to be shown (`platform::relay`).
+    External(crate::platform::Ext),
+    /// The tray's Exit: leave for real (closing the window only hides it while the tray is up).
+    Quit,
 }
 
-/// Forwards core callbacks (tokio worker threads) into the UI channel and wakes the UI.
+/// Forwards core callbacks (tokio worker threads) into the UI channel and wakes the UI; with `notifying`, it first
+/// shows the OS notification the event calls for (here, not in a frame: a hidden window may run none).
 pub struct Bridge {
     tx: Sender<Event>,
     ctx: egui::Context,
+    notify: Option<Notifier>,
+}
+
+struct Notifier {
+    /// Weak: the core owns this bridge.
+    core: Weak<MimirApp>,
+    focus: Arc<Mutex<Focus>>,
+    /// `platform::notify::show` in the app; a recorder in tests (they never toast).
+    show: Box<dyn Fn(String, String) + Send + Sync>,
+    /// The last caller announced, and when (the core may report one call more than once).
+    last_ring: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
 }
 
 impl Bridge {
     pub fn new(tx: Sender<Event>, ctx: egui::Context) -> Bridge {
-        Bridge { tx, ctx }
+        Bridge { tx, ctx, notify: None }
+    }
+
+    /// Also decides notifications against `focus` (what the window shows) and hands them to `show`.
+    pub fn notifying(self, core: &Arc<MimirApp>, focus: Arc<Mutex<Focus>>, show: impl Fn(String, String) + Send + Sync + 'static) -> Bridge {
+        Bridge { notify: Some(Notifier { core: Arc::downgrade(core), focus, show: Box::new(show), last_ring: Mutex::new(None) }), ..self }
     }
 
     fn send(&self, e: Event) {
+        if let Some(n) = &self.notify {
+            let focus = *n.focus.lock().unwrap_or_else(|p| p.into_inner());
+            let notice = n.core.upgrade().and_then(|core| decide(&core, &e, &focus)).filter(|_| match &e {
+                Event::IncomingCall { pubkey } => new_ring(&mut n.last_ring.lock().unwrap_or_else(|p| p.into_inner()), pubkey, std::time::Instant::now()),
+                _ => true,
+            });
+            if let Some((title, body)) = notice {
+                (n.show)(title, body);
+            }
+        }
         // A closed receiver means shutdown; ignore.
         let _ = self.tx.send(e);
         self.ctx.request_repaint();
@@ -181,5 +213,25 @@ mod tests {
         let b = Bridge::new(tx, egui::Context::default());
         b.on_message_received(5, 77, 0, 0);
         assert!(matches!(rx.try_recv().unwrap(), Event::MessageReceived { contact_id: 5, message_id: 77, .. }));
+    }
+
+    #[test]
+    fn notifies_while_hidden() {
+        let (_t, core) = crate::test_support::test_app();
+        let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
+        let id = core.add_local_message(c, 1, 0, true, false, 1000, 0, 0, "привет".as_bytes().to_vec()).unwrap();
+        // The window is hidden: the app wrote focused = false and runs no frame.
+        let focus = Arc::new(Mutex::new(Focus { chat: Some(crate::model::chat_key::ChatKey::Contact(c)), focused: false, lang: crate::i18n::Lang::Ru }));
+        let shown = Arc::new(Mutex::new(vec![]));
+        let rec = shown.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b = Bridge::new(tx, egui::Context::default()).notifying(&core, focus, move |t, b| rec.lock().unwrap().push((t, b)));
+        b.on_message_received(c, id, 0, 0);
+        b.on_contact_connected(vec![7; 32]);
+        assert_eq!(*shown.lock().unwrap(), [("Аня".to_string(), "привет".to_string())]);
+        b.on_incoming_call(vec![7; 32]);
+        b.on_incoming_call(vec![7; 32]);
+        assert_eq!(shown.lock().unwrap().len(), 2, "a repeated ring is announced once");
+        assert!(matches!(rx.try_recv().unwrap(), Event::MessageReceived { .. }), "still forwarded");
     }
 }

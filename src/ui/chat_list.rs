@@ -62,8 +62,8 @@ fn row(ui: &mut Ui, r: &ChatRow, selected: bool, p: &Palette, thumbs: &mut Thumb
     match r.key {
         ChatKey::SAVED => paint_saved(g, av, p.accent),
         // Android getAvatarColor(chatId.toString().toByteArray()).
-        ChatKey::Group(id) => avatar::paint(ui, thumbs, av, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), dark), 6.),
-        ChatKey::Contact(_) => avatar::paint(ui, thumbs, av, path.as_deref(), avatar_color(&r.pubkey), 6.),
+        ChatKey::Group(id) => avatar::paint(ui, thumbs, av, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), dark), 3.),
+        ChatKey::Contact(_) => avatar::paint(ui, thumbs, av, path.as_deref(), avatar_color(&r.pubkey), 3.),
     }
 
     let text_x = av.right() + 9.;
@@ -87,7 +87,7 @@ fn row(ui: &mut Ui, r: &ChatRow, selected: bool, p: &Palette, thumbs: &mut Thumb
         let galley = g.layout_no_wrap(text, FontId::proportional(10.5), Color32::WHITE);
         let w = (galley.size().x + 10.).max(16.);
         let pill = Rect::from_min_size(pos2(rect.right() - 9. - w, rect.top() + 34.), vec2(w, 16.));
-        g.rect_filled(pill, CornerRadius::same(4), Color32::from_rgb(0x80, 0x80, 0x80));
+        g.rect_filled(pill, CornerRadius::same(2), Color32::from_rgb(0x80, 0x80, 0x80));
         g.galley(pill.center() - galley.size() / 2., galley, Color32::WHITE);
     }
     resp

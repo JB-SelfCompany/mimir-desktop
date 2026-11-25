@@ -115,15 +115,25 @@ impl Player {
 /// Opens `path` with symphonia's container readers. The `File` itself is the source: the MP4 reader needs the byte
 /// length, which rodio 0.20's own symphonia decoder hides ("stream is not seekable" for every m4a).
 fn probe(path: &Path) -> Result<Box<dyn FormatReader>, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    probe_source(Box::new(file), path.extension().and_then(|e| e.to_str()))
+}
+
+fn probe_source(src: Box<dyn symphonia::core::io::MediaSource>, ext: Option<&str>) -> Result<Box<dyn FormatReader>, String> {
     use symphonia::core::{io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
-    let src = MediaSourceStream::new(Box::new(std::fs::File::open(path).map_err(|e| e.to_string())?), Default::default());
+    let src = MediaSourceStream::new(src, Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = ext {
         hint.with_extension(ext);
     }
     let opts = FormatOptions { enable_gapless: true, ..Default::default() };
     let probed = symphonia::default::get_probe().format(&hint, src, &opts, &MetadataOptions::default()).map_err(|e| e.to_string())?;
     Ok(probed.format)
+}
+
+/// A sound built into the app (`ext`: its container's file extension), as a rodio source.
+pub fn embedded(bytes: &'static [u8], ext: &str) -> Result<impl rodio::Source<Item = f32> + Send, String> {
+    Decoded::new(probe_source(Box::new(std::io::Cursor::new(bytes)), Some(ext))?)
 }
 
 /// Length of an audio file from its container (symphonia), without decoding it.
@@ -156,7 +166,10 @@ struct Decoded {
 
 impl Decoded {
     fn open(path: &Path) -> Result<Decoded, String> {
-        let format = probe(path)?;
+        Decoded::new(probe(path)?)
+    }
+
+    fn new(format: Box<dyn FormatReader>) -> Result<Decoded, String> {
         let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).ok_or("no audio track")?;
         let decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).map_err(|e| e.to_string())?;
         let (len_ms, track, spec) = (len_of(&track.codec_params).unwrap_or(0), track.id, SignalSpec::new(44100, Channels::FRONT_LEFT));

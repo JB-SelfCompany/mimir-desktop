@@ -12,7 +12,7 @@ use crate::{
         theme::{close_button, danger_button, dialog, dialog_title, field_label, palette, primary_button, Palette},
     },
 };
-use eframe::egui::{self, vec2, Align, CursorIcon, FontId, Id, Layout, RichText, Role, Sense, TextEdit, ViewportCommand, WidgetInfo};
+use eframe::egui::{self, vec2, Align, CursorIcon, FontId, Id, Layout, RichText, Role, Sense, TextEdit, WidgetInfo};
 use mimir::MimirApp;
 use std::{fs, path::{Path, PathBuf}};
 
@@ -72,7 +72,7 @@ pub(super) fn action_row(ui: &mut egui::Ui, p: &Palette, lang: Lang, title: Key,
     let (rect, resp) = ui.allocate_exact_size(vec2(width, t.size().y + d.size().y + 10.), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, title));
     if resp.hovered() {
-        ui.painter().rect_filled(rect.expand2(vec2(4., 0.)), 6., p.field);
+        ui.painter().rect_filled(rect.expand2(vec2(4., 0.)), 3., p.field);
     }
     let top = rect.min + vec2(0., 4.);
     ui.painter().galley(top + vec2(0., t.size().y + 2.), d, p.text_dim);
@@ -227,7 +227,7 @@ pub fn advanced(app: &mut MimirDesktop, ui: &mut egui::Ui) {
 }
 
 /// The confirmation over the settings modal: deleting orphans (ours, P4-R4: title and text are the row's), exiting or
-/// importing a backup (Android's). ponytail: exit closes the window; the tray comes in Plan 5.
+/// importing a backup (Android's). Exit quits for real, past the tray.
 pub fn confirm(app: &mut MimirDesktop, ctx: &egui::Context, which: Confirm) {
     let lang = app.lang;
     let (title, text, ok) = match which {
@@ -255,7 +255,7 @@ pub fn confirm(app: &mut MimirDesktop, ctx: &egui::Context, which: Confirm) {
                 app.state.settings_ui.job = Some((Job::Orphans, None));
                 app.worker.submit(Box::new(move |core| delete_orphans(core, &dir)));
             }
-            Confirm::Exit => ctx.send_viewport_cmd(ViewportCommand::Close),
+            Confirm::Exit => app.quit(ctx),
             Confirm::Import => {
                 if let Some(path) = app.state.settings_ui.import_path.take() {
                     super::stage_import(app, path);
@@ -272,6 +272,7 @@ pub fn confirm(app: &mut MimirDesktop, ctx: &egui::Context, which: Confirm) {
 mod tests {
     use super::*;
     use crate::{core::{events::Event, net::config_for}, settings::Settings, test_support::{test_app, test_harness}, ui::settings::{open, Section}};
+    use eframe::egui::ViewportCommand;
     use egui_kittest::{kittest::Queryable as _, Harness};
 
     type H = Harness<'static, MimirDesktop>;

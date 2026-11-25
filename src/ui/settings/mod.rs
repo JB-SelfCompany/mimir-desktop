@@ -231,20 +231,20 @@ pub fn import_staged(app: &mut MimirDesktop, ctx: &egui::Context, err: Option<&S
         Some(e) => job_failed(app, Job::Import, trf(app.lang, Key::BackupImportFailed, &[e])),
         None => {
             app.state.settings_ui.restarting = true;
-            relaunch(ctx);
+            relaunch(app, ctx);
         }
     }
 }
 
-/// P4-R1: starts a new instance (same exe, args and environment) and closes this one; the new one waits for our files
-/// (`backup::finish_pending` retries its renames). ponytail: if the spawn fails the window still closes, and the import
-/// is applied at the next manual start.
-fn relaunch(ctx: &egui::Context) {
+/// P4-R1: starts a new instance (same exe, args and environment) and quits this one for real (not to the tray); the new
+/// one waits for our instance lock (`platform::RELAUNCHED`) and our files (`backup::finish_pending` retries its renames).
+/// ponytail: if the spawn fails the app still quits, and the import is applied at the next manual start.
+fn relaunch(app: &mut MimirDesktop, ctx: &egui::Context) {
     #[cfg(not(test))]
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn();
+        let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(crate::platform::RELAUNCHED, "1").spawn();
     }
-    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    app.quit(ctx);
 }
 
 /// Android's BackupActivity rows; progress and result under each (the status line is hidden under the modal).
@@ -310,7 +310,7 @@ fn nav_row(ui: &mut egui::Ui, p: &Palette, text: &str, selected: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(NAV_W, 32.), Sense::click());
     resp.widget_info(|| WidgetInfo::selected(Role::Button, true, selected, text));
     let fill = if selected { p.accent } else if resp.hovered() { p.field } else { Color32::TRANSPARENT };
-    ui.painter().rect_filled(rect, 6., fill);
+    ui.painter().rect_filled(rect, 3., fill);
     let color = if selected { Color32::BLACK } else { p.text };
     ui.painter().text(rect.left_center() + vec2(12., 0.), Align2::LEFT_CENTER, text, FontId::proportional(14.), color);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
@@ -593,6 +593,7 @@ mod tests {
         h.run_steps(2);
         run_until(&mut h, "the staging", |h| h.state().state.settings_ui.restarting);
         assert!(pending.is_file());
+        assert!(h.state().state.quitting, "the relaunch quits for real: the tray does not keep this instance");
     }
 
     #[test]

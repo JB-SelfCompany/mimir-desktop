@@ -144,11 +144,11 @@ impl Attachment {
                 resp.widget_info(|| WidgetInfo::labeled(Role::Image, true, tr(lang, Key::Image)));
                 let view = match &tex {
                     Some(tex) => {
-                        Image::new((tex.id(), img)).corner_radius(4).paint_at(ui, r);
+                        Image::new((tex.id(), img)).corner_radius(2).paint_at(ui, r);
                         resp.clicked().then_some(Action::View)
                     }
                     None => {
-                        painter.rect_filled(r, 4, Color32::from_gray(128).gamma_multiply(0.25));
+                        painter.rect_filled(r, 2, Color32::from_gray(128).gamma_multiply(0.25));
                         None
                     }
                 };
@@ -163,17 +163,17 @@ impl Attachment {
                         let [w, h] = tex.size().map(|v| v as f32);
                         let e = w.min(h);
                         let uv = Rect::from_min_max(pos2((w - e) / 2. / w, (h - e) / 2. / h), pos2((w + e) / 2. / w, (h + e) / 2. / h));
-                        Image::new((tex.id(), rect.size())).uv(uv).corner_radius(20).paint_at(ui, rect);
+                        Image::new((tex.id(), rect.size())).uv(uv).corner_radius(10).paint_at(ui, rect);
                     }
                     None => {
-                        painter.rect_filled(rect, 20, Color32::from_gray(0x20));
+                        painter.rect_filled(rect, 10, Color32::from_gray(0x20));
                     }
                 }
                 play_badge(painter, rect.center());
                 if let Some(ms) = ms {
                     let text = painter.layout_no_wrap(voice_bubble::clock(ms), FontId::proportional(12.), Color32::WHITE);
                     let pill = Rect::from_min_size(pos2(rect.left() + 12., rect.bottom() - 12. - text.size().y - 4.), text.size() + vec2(12., 4.));
-                    painter.rect_filled(pill, 8, Color32::from_black_alpha(140));
+                    painter.rect_filled(pill, 4, Color32::from_black_alpha(140));
                     painter.galley(pill.min + vec2(6., 2.), text, Color32::WHITE);
                 }
                 let open = resp.clicked().then_some(Action::Open);
@@ -188,7 +188,7 @@ impl Attachment {
                 }
                 let resp = ui.interact(rect, id, Sense::click());
                 resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-                painter.rect_filled(icon, 6, p.file_icon);
+                painter.rect_filled(icon, 3, p.file_icon);
                 match progress {
                     Some(f) => ring(painter, icon.center(), f, p),
                     None if let Some(playing) = audio => play_pause(painter, icon.center(), playing, p.text),
@@ -404,7 +404,7 @@ mod tests {
                 Shape::Rect(r) if r.rect.left() > 250. && r.rect.size() == egui::vec2(40., 40.) => Some((r.fill, r.corner_radius)),
                 _ => None,
             });
-            assert_eq!(icon, Some((crate::ui::theme::palette(dark).file_icon, CornerRadius::same(6))), "40x40 icon box, dark={dark}");
+            assert_eq!(icon, Some((crate::ui::theme::palette(dark).file_icon, CornerRadius::same(3))), "40x40 icon box, dark={dark}");
         }
         let names = painted_text(&h, |t| t.starts_with("Годовой"));
         assert_eq!(names.len(), 1);
@@ -527,6 +527,52 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("player never reached the state: {:?}", h.state().player.state());
+    }
+
+    #[test]
+    fn opened_chat_shows_the_last_row_whole() {
+        // F7: a chat once opened away from the bottom (at its first unread) reopened at that old offset: egui keeps
+        // each scroll area's state, and its stuck-to-bottom flag stayed off, so the last bubble was cut or not shown.
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        h.set_size(egui::vec2(1362., 833.));
+        let core = h.state().core.clone();
+        let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
+        let files = h.state().paths.files_dir.clone();
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("Ab3dEf7hIj9kLm1n.jpg"), encoded(1200, 800, image::ImageFormat::Jpeg)).unwrap();
+        std::fs::write(files.join("Vc1.m4a"), std::fs::read(crate::media::player::tests::FIXTURE).unwrap()).unwrap();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+        let mut add = |guid: i64, msg_type: i32, data: &str| {
+            core.add_local_message(c, guid, 0, guid % 2 == 0, true, now - 100_000 + guid, 0, msg_type, data.as_bytes().to_vec()).unwrap()
+        };
+        let mut ids = vec![];
+        for g in 1..=8 {
+            ids.push(add(g, 0, &format!("строка {g}")));
+        }
+        add(9, 1, &image_meta("This is the view from the top", 12345));
+        add(10, 3, VOICE);
+        add(11, 0, "Deal. I'll bring coffee");
+        core.mark_all_read(c).unwrap();
+        core.set_message_read(c, ids[1], false).unwrap(); // the first open lands on it, near the top
+        h.state_mut().state.chats = build_chat_list(&core, Lang::Ru);
+        h.state_mut().state.selected = Some(ChatKey::Contact(c));
+        settle(&mut h);
+        assert!(!h.state().state.open_chat.as_ref().unwrap().timeline.at_bottom, "opened at the unread row");
+        // Read now: every later open starts at the latest message.
+        for _ in 0..2 {
+            h.state_mut().state.selected = Some(ChatKey::SAVED);
+            h.run();
+            h.state_mut().state.selected = Some(ChatKey::Contact(c));
+            settle(&mut h);
+            let last = h.query_all_by_label("Deal. I'll bring coffee").map(|n| n.rect()).find(|r| r.left() > 250.);
+            let last = last.expect("the last row is on screen");
+            // The bubble as painted, and the clip of the chat's scroll area it was painted in.
+            let clip = h.output().shapes.iter().find_map(|cs| match &cs.shape {
+                Shape::Rect(r) if r.rect == last => Some(cs.clip_rect),
+                _ => None,
+            }).expect("the last bubble painted");
+            assert!(last.bottom() <= clip.bottom() + 0.5 && last.top() >= clip.top(), "last bubble {last:?} cut by the chat area {clip:?}");
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
     let g = ui.painter();
     if resp.hovered() {
-        g.rect_filled(rect, 6., Color32::from_white_alpha(24));
+        g.rect_filled(rect, 3., Color32::from_white_alpha(24));
     }
     let o = rect.center() - vec2(12., 12.);
     let s = Stroke::new(1.8, Color32::WHITE);
@@ -81,7 +81,7 @@ fn toolbar(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
                 Some(path) => {
                     let (rect, resp) = ui.allocate_exact_size(vec2(32., 32.), Sense::click());
                     resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, tr(lang, Key::Profile)));
-                    crate::ui::avatar::paint(ui, &mut app.state.thumbs, rect, Some(&path), p.accent, 6.);
+                    crate::ui::avatar::paint(ui, &mut app.state.thumbs, rect, Some(&path), p.accent, 3.);
                     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr(lang, Key::Profile))
                 }
                 None => icon_button(ui, Icon::Profile, tr(lang, Key::Profile)),

@@ -63,11 +63,11 @@ impl Voice {
         seek.widget_info(|| WidgetInfo { value: Some(f64::from(self.frac)), ..WidgetInfo::new(Role::ProgressIndicator) });
 
         let painter = ui.painter();
-        painter.rect_filled(icon, 6, p.file_icon);
+        painter.rect_filled(icon, 3, p.file_icon);
         play_pause(painter, icon.center(), self.playing, p.text);
-        painter.rect_filled(bar, 2, p.text.gamma_multiply(0.2));
+        painter.rect_filled(bar, 1, p.text.gamma_multiply(0.2));
         let done = pos2(bar.left() + bar.width() * self.frac, bar.center().y);
-        painter.rect_filled(Rect::from_min_max(bar.min, pos2(done.x, bar.max.y)), 2, p.accent);
+        painter.rect_filled(Rect::from_min_max(bar.min, pos2(done.x, bar.max.y)), 1, p.accent);
         painter.circle_filled(done, 5., p.accent);
         painter.galley(pos2(x0, bar.bottom() + 7.), self.time, p.text);
 

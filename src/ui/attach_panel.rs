@@ -133,14 +133,14 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
         let text_w = (ui.available_width() - PREVIEW - 24. - 2. * ui.spacing().item_spacing.x).max(0.);
         if let Some(s) = &c.attachment {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(PREVIEW), Sense::hover());
-            ui.painter().rect_filled(rect, 8, p.file_icon);
+            ui.painter().rect_filled(rect, 4, p.file_icon);
             match (s.msg_type == 1).then(|| thumbs.get_sized(ui.ctx(), &s.path, PREVIEW_PX)) {
                 // Centre square of the picture (Android centerCrop).
                 Some(Thumb::Ready(tex, _)) => {
                     let [w, h] = tex.size().map(|v| v as f32);
                     let e = w.min(h);
                     let uv = Rect::from_min_max(pos2((w - e) / 2. / w, (h - e) / 2. / h), pos2((w + e) / 2. / w, (h + e) / 2. / h));
-                    Image::new(&tex).uv(uv).corner_radius(8).paint_at(ui, rect);
+                    Image::new(&tex).uv(uv).corner_radius(4).paint_at(ui, rect);
                 }
                 _ => document_icon(ui.painter(), rect.center(), p.text),
             }

@@ -125,7 +125,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
                 ui.horizontal(|ui| {
                     // AM §9: 64 px, corner 8, in the invites list.
                     let base = avatar_seed_color(i.chat_id.to_string().as_bytes(), ui.visuals().dark_mode);
-                    avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &i.chat_avatar).as_deref(), base, 64., 8.);
+                    avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &i.chat_avatar).as_deref(), base, 64., 4.);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&i.chat_name).size(16.).strong());
                         if !i.chat_description.is_empty() {

@@ -24,9 +24,9 @@ pub fn avatar_seed_color(seed: &[u8], _dark: bool) -> Color32 {
     avatar_color(seed)
 }
 
-/// Rounded square (radius 6), lighter at the top, `base` at the bottom.
+/// Rounded square (radius 3), lighter at the top, `base` at the bottom.
 pub fn paint_placeholder(painter: &Painter, rect: Rect, base: Color32) {
-    paint_rounded(painter, rect, base, 6.);
+    paint_rounded(painter, rect, base, 3.);
 }
 
 /// The placeholder with corner radius `r`.
@@ -123,8 +123,8 @@ pub fn pick_button(ui: &mut Ui, thumbs: &mut ThumbCache, pick: &AvatarPick, path
     let enabled = ui.is_enabled() && !busy;
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, label));
     match &pick.preview {
-        Some(tex) => Image::new(tex).corner_radius(8).paint_at(ui, rect),
-        None => paint(ui, thumbs, rect, path, base, 8.),
+        Some(tex) => Image::new(tex).corner_radius(4).paint_at(ui, rect),
+        None => paint(ui, thumbs, rect, path, base, 4.),
     }
     let c = rect.left_bottom() + vec2(18., -18.);
     ui.painter().circle_filled(c, 14., Color32::from_black_alpha(if resp.hovered() { 170 } else { 110 }));

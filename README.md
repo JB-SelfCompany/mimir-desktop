@@ -30,9 +30,6 @@ Mimir Desktop runs the same core library as Mimir for Android and talks to it on
 
 The window follows the Android app closely, so nothing has to be relearned. It is written in Rust with [egui](https://github.com/emilk/egui) and ships as a single executable for Windows and Linux.
 
-> [!NOTE]
-> Early release. Tray icon, system notifications and opening `mimir://` links from the browser are in progress.
-
 ## Features
 
 **Messaging.** One-to-one chats and Saved Messages, replies, reactions, forwarding, drafts, delivery ticks, unread markers.
@@ -42,6 +39,8 @@ The window follows the Android app closely, so nothing has to be relearned. It i
 **Media.** Photos with a built-in viewer, files of any type, voice messages in the same AAC format Android records, video messages from the phone. Drag and drop or paste an image with Ctrl+V.
 
 **Backup.** Import an Android backup to bring your history over, export one to move back. Settings travel with it.
+
+**Desktop.** Lives in the tray, notifies about new messages, group invites and incoming calls, opens `mimir://` links from the browser, and runs one copy per profile.
 
 **Settings.** The same options as on Android: auto-download limits, who may send contact requests, image resizing, voice quality, font size, Yggdrasil peers, mediators. Light and dark theme, English and Russian.
 
@@ -58,7 +57,7 @@ Builds for Windows (zip) and Linux (tar.gz) are on the [releases page](https://g
 
 To record voice messages, put [`ffmpeg`](https://ffmpeg.org/download.html) next to the executable or on `PATH`. Everything else works without it.
 
-On Linux the app needs GTK 3 and ALSA, which most desktops already have.
+On Linux the app needs GTK 3 and ALSA, which most desktops already have, and `libayatana-appindicator3-1` for the tray icon.
 
 ## Building from source
 

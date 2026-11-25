@@ -20,11 +20,13 @@ pub struct Timeline {
     /// Height just prepended: egui clamps a new offset by last frame's content size, so first grow the content
     /// (old rows shown at the top, padding at the bottom), and only then move the offset.
     settle: Option<f32>,
+    /// Just opened: the first frame drops the scroll state egui kept from this chat's last visit.
+    fresh: bool,
 }
 
 impl Timeline {
     pub fn empty() -> Timeline {
-        Timeline { key: ChatKey::Contact(0), msgs: vec![], heights: vec![], at_bottom: true, has_more: false, oldest_id: i64::MAX, armed: false, pending_offset: None, settle: None }
+        Timeline { key: ChatKey::Contact(0), msgs: vec![], heights: vec![], at_bottom: true, has_more: false, oldest_id: i64::MAX, armed: false, pending_offset: None, settle: None, fresh: false }
     }
 
     /// Forgets the measured row heights (the message font changed): rows on screen are re-measured next frame,
@@ -34,7 +36,7 @@ impl Timeline {
     }
 
     pub fn open(app: &MimirApp, key: ChatKey) -> Timeline {
-        let mut t = Timeline { key, ..Timeline::empty() };
+        let mut t = Timeline { key, fresh: true, ..Timeline::empty() };
         t.load_before(app, i64::MAX);
         // A page of only reactions shows nothing (and cannot be scrolled to load more): keep going.
         while t.msgs.is_empty() && t.has_more {
@@ -131,6 +133,12 @@ pub fn show_timeline(
     mut row: impl FnMut(&mut egui::Ui, &StoredMessage) -> egui::Response,
 ) {
     t.heights.resize(t.msgs.len(), EST_HEIGHT);
+    // egui keeps each scroll area's state for as long as the app runs. A chat last left away from the bottom (opened at
+    // its first unread, scrolled up) would reopen at that offset with sticking off, the latest row cut or off screen:
+    // a fresh open starts from the default state (top, stuck to the end) like a first visit.
+    if std::mem::take(&mut t.fresh) {
+        egui::scroll_area::State::default().store(ui.ctx(), ui.make_persistent_id(egui::IdSalt::new(t.key)));
+    }
     // Per-chat id: another chat must not inherit this one's offset or stuck-to-bottom state.
     let mut area = egui::ScrollArea::vertical().id_salt(t.key).auto_shrink(false).stick_to_bottom(t.at_bottom);
     if let Some(y) = t.pending_offset.take() { area = area.vertical_scroll_offset(y); }

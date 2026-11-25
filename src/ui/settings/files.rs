@@ -115,7 +115,7 @@ fn row(ui: &mut egui::Ui, p: &Palette, lang: Lang, r: &FileRow) -> (bool, bool) 
     let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &r.original_name));
     if resp.hovered() {
-        ui.painter().rect_filled(rect.expand2(vec2(4., 0.)), 6., p.field);
+        ui.painter().rect_filled(rect.expand2(vec2(4., 0.)), 3., p.field);
     }
     let top = rect.min + vec2(0., 5.);
     ui.painter().galley(top + vec2(0., t.size().y + 2.), d, p.text_dim);

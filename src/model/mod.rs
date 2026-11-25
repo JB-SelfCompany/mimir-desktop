@@ -213,6 +213,14 @@ pub struct AppState {
     pub ffmpeg: Option<std::path::PathBuf>,
     /// Video poster frames, made with `ffmpeg` off the UI thread.
     pub posters: crate::media::ffmpeg::Posters,
+    /// True while the tray icon is up (`platform::tray::spawn`): closing the window then only hides it.
+    pub tray: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by an explicit exit (tray, settings): the window close that follows is not cancelled.
+    pub quitting: bool,
+    /// The window was closed to the tray (or minimized on Wayland) and not shown since: it has no focus.
+    pub hidden: bool,
+    /// The last incoming call (caller's key, when it rang): the caller's chat shows a banner for a minute.
+    pub incoming_call: Option<(Vec<u8>, Instant)>,
 }
 
 #[cfg(test)]

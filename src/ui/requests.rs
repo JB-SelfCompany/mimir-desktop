@@ -56,7 +56,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
                 let name = crate::model::chat_list::display_name(&q.nickname, &q.pubkey);
                 ui.horizontal(|ui| {
                     // AM §9: 48 px in contact requests.
-                    avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &q.avatar).as_deref(), avatar_color(&q.pubkey), 48., 6.);
+                    avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &q.avatar).as_deref(), avatar_color(&q.pubkey), 48., 3.);
                     ui.vertical(|ui| {
                         ui.strong(name);
                         if !q.message.is_empty() {

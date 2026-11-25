@@ -129,7 +129,7 @@ struct RowCx<'a> {
 fn day_separator(painter: &egui::Painter, row_rect: Rect, m: &StoredMessage, lang: Lang, p: &Palette) {
     let label = painter.layout_no_wrap(day_label(m.send_time, now_ms(), lang), FontId::proportional(11.), p.text_dim);
     let r = Rect::from_center_size(pos2(row_rect.center().x, row_rect.top() + SEP_H / 2.), label.size() + vec2(16., 2.));
-    painter.rect_filled(r, 4., p.list_bg);
+    painter.rect_filled(r, 2., p.list_bg);
     painter.galley(r.center() - label.size() / 2., label, p.text_dim);
 }
 
@@ -148,7 +148,7 @@ fn system_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response 
     }
     let r = Rect::from_center_size(pos2(row_rect.center().x, row_rect.top() + day_sep + 7. + galley.size().y / 2.), galley.size() + vec2(16., 4.));
     let label = galley.text().to_string();
-    painter.rect_filled(r, 4., p.list_bg);
+    painter.rect_filled(r, 2., p.list_bg);
     painter.galley(r.center() - galley.size() / 2., galley, p.text_dim);
     ui.interact(r, ui.scope_id().with(("system", m.id)), Sense::hover()).widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
     row_resp
@@ -307,7 +307,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
         day_separator(painter, row_rect, m, lang, p);
     }
     let colour = if out { p.bubble_out } else { p.bubble_in };
-    let r = 4;
+    let r = crate::ui::bubble::RADIUS as u8;
     let corners = if out { CornerRadius { nw: r, ne: r, sw: r, se: 0 } } else { CornerRadius { nw: r, ne: r, sw: 0, se: r } };
     painter.rect_filled(g.body, corners, colour);
     painter.add(Shape::convex_polygon(g.tail.to_vec(), colour, Stroke::NONE));
@@ -315,7 +315,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
         let r = Rect::from_min_size(pos2(row_rect.left() + 8., body_min.y), Vec2::splat(SENDER_AV));
         let base = ms.pubkey(m.contact_id).map_or(p.text_dim, |k| avatar_seed_color(k, ui.visuals().dark_mode));
         let path = ms.avatar(m.contact_id).and_then(|a| media::avatar::resolve(cx.core_dir, a));
-        avatar::paint(ui, cx.thumbs, r, path.as_deref(), base, 6.);
+        avatar::paint(ui, cx.thumbs, r, path.as_deref(), base, 3.);
     }
     let painter = ui.painter();
     if let Some(ng) = sender {
@@ -376,7 +376,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
         let chip = ui.interact(rect, ui.scope_id().with(("chip", m.id, emoji.as_str())), Sense::click());
         chip.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
         let fill = if *mine { p.accent.gamma_multiply(0.45) } else { Color32::from_gray(128).gamma_multiply(0.25) };
-        ui.painter().rect_filled(rect, 4., fill);
+        ui.painter().rect_filled(rect, 2., fill);
         ui.painter().galley(rect.center() - gal.size() / 2., gal, p.text);
         if chip.clicked() {
             cx.actions.push((Action::React(emoji.clone()), mref.clone()));
@@ -428,8 +428,8 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
             let path = path.as_deref();
             match chat.key {
                 ChatKey::SAVED => paint_saved(ui.painter(), av, p.accent),
-                ChatKey::Group(id) => avatar::paint(ui, thumbs, av, path, avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 6.),
-                ChatKey::Contact(_) => avatar::paint(ui, thumbs, av, path, avatar_color(&chat.pubkey), 6.),
+                ChatKey::Group(id) => avatar::paint(ui, thumbs, av, path, avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 3.),
+                ChatKey::Contact(_) => avatar::paint(ui, thumbs, av, path, avatar_color(&chat.pubkey), 3.),
             }
             let badge = if group { Some(status_color(chat.status)) } else { (online && !saved).then_some(Color32::from_rgb(0x00, 0xAA, 0x00)) };
             if let Some(colour) = badge {
@@ -483,6 +483,21 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
         });
     });
     (toggle, more)
+}
+
+/// How long the incoming-call banner stays after the contact rang.
+const CALL_BANNER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A row under the header while this chat's contact rang less than a minute ago: the desktop does not take calls.
+fn call_banner(ui: &mut Ui, state: &AppState, lang: Lang, p: &Palette) {
+    let Some(chat) = state.open_chat.as_ref().filter(|c| !c.key.is_group()) else { return };
+    let Some((_, rang)) = state.incoming_call.as_ref().filter(|(key, _)| *key == chat.pubkey) else { return };
+    let Some(left) = CALL_BANNER.checked_sub(rang.elapsed()) else { return };
+    ui.ctx().request_repaint_after(left);
+    Frame::NONE.fill(p.field).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.add(egui::Label::new(RichText::new(tr(lang, Key::IncomingCall)).size(13.).color(p.text)).selectable(false));
+    });
 }
 
 fn handle(app: &mut MimirDesktop, ctx: &egui::Context, action: Action, m: &MsgRef) {
@@ -605,10 +620,10 @@ fn forward_dialog(app: &mut MimirDesktop, ctx: &egui::Context) {
                                 paint_saved(ui.painter(), rect, p.accent);
                             }
                             ChatKey::Group(id) => {
-                                avatar::show(ui, thumbs, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 32., 6.);
+                                avatar::show(ui, thumbs, path.as_deref(), avatar_seed_color(id.to_string().as_bytes(), ui.visuals().dark_mode), 32., 3.);
                             }
                             ChatKey::Contact(_) => {
-                                avatar::show(ui, thumbs, path.as_deref(), avatar_color(&row.pubkey), 32., 6.);
+                                avatar::show(ui, thumbs, path.as_deref(), avatar_color(&row.pubkey), 32., 3.);
                             }
                         }
                         ui.add(egui::Label::new(&row.name).selectable(false));
@@ -686,6 +701,7 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     let mut actions = vec![];
     {
         let (toggle, more) = header(ui, &mut app.state, &app.paths.core_dir, lang, p);
+        call_banner(ui, &app.state, lang, p);
         app.state.info_open ^= toggle;
         if let Some(more) = more {
             info_panel::menu(app, &more);
@@ -769,6 +785,32 @@ mod tests {
         h.state_mut().state.selected = Some(ChatKey::SAVED);
         h.run();
         h
+    }
+
+    #[test]
+    fn call_banner_shown() {
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        let core = h.state().core.clone();
+        let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().rx = rx;
+        h.state_mut().state.chats = crate::model::chat_list::build_chat_list(&core, Lang::Ru);
+        h.state_mut().state.selected = Some(ChatKey::Contact(c));
+        h.run();
+        let text = "Входящий звонок — ответьте на телефоне";
+        assert!(h.query_by_label(text).is_none());
+        tx.send(crate::core::events::Event::IncomingCall { pubkey: vec![8; 32] }).unwrap();
+        h.run();
+        assert!(h.query_by_label(text).is_none(), "another contact rang");
+        tx.send(crate::core::events::Event::IncomingCall { pubkey: vec![7; 32] }).unwrap();
+        h.run();
+        let banner = h.get_by_label(text).rect();
+        let title = h.get_by_role_and_label(Role::Label, "Аня").rect();
+        assert!(banner.top() > title.bottom(), "under the header: {banner:?} {title:?}");
+        let rang = std::time::Instant::now() - std::time::Duration::from_secs(61);
+        h.state_mut().state.incoming_call.as_mut().unwrap().1 = rang;
+        h.run();
+        assert!(h.query_by_label(text).is_none(), "gone after a minute");
     }
 
     #[test]

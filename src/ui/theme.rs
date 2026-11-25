@@ -112,7 +112,9 @@ pub fn install(ctx: &Context) {
         v.panel_fill = p.list_bg;
         v.window_fill = p.list_bg;
         v.selection.bg_fill = p.accent;
-        let r = CornerRadius::same(6);
+        let r = CornerRadius::same(3);
+        v.window_corner_radius = r;
+        v.menu_corner_radius = r;
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -136,6 +138,9 @@ mod tests {
         install(&ctx);
         assert_eq!(ctx.style_of(Theme::Dark).visuals.selection.bg_fill, palette(true).accent);
         assert_eq!(ctx.style_of(Theme::Light).visuals.panel_fill, palette(false).list_bg);
+        let v = &ctx.style_of(Theme::Light).visuals;
+        let r = CornerRadius::same(3);
+        assert_eq!((v.widgets.inactive.corner_radius, v.window_corner_radius, v.menu_corner_radius), (r, r, r), "half egui's 6");
     }
     #[test]
     fn palette_matches_spec() {

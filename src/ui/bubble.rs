@@ -1,7 +1,7 @@
-//! Message bubble geometry (Android 3.3.7): radius 4, sender-side bottom corner square, 8x8 tail outside the body.
+//! Message bubble geometry (Android 3.3.7): radius 2, sender-side bottom corner square, 8x8 tail outside the body.
 use eframe::egui::{pos2, Pos2, Rect, vec2};
 
-pub const RADIUS: f32 = 4.0;
+pub const RADIUS: f32 = 2.0;
 pub const TAIL: f32 = 8.0;
 
 pub struct BubbleGeom {

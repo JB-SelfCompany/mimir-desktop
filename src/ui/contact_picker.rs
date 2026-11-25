@@ -50,7 +50,7 @@ impl ContactPicker {
                     let row = click_row(ui, |ui| {
                         ui.set_min_width(w);
                         ui.horizontal(|ui| {
-                            avatar::show(ui, thumbs, resolve(data_dir, stored).as_deref(), avatar_color(pubkey), 32., 6.);
+                            avatar::show(ui, thumbs, resolve(data_dir, stored).as_deref(), avatar_color(pubkey), 32., 3.);
                             ui.add(Label::new(name).selectable(false));
                         });
                     });

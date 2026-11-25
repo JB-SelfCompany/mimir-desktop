@@ -169,7 +169,7 @@ pub fn contents(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     let close_clicked = panel_frame(ui, p, lang, |ui| {
         ui.vertical_centered(|ui| {
             // AM §9: 128 px, corner 8, in contact info.
-            avatar::show(ui, thumbs, path.as_deref(), avatar_color(&pubkey), 128., 8.);
+            avatar::show(ui, thumbs, path.as_deref(), avatar_color(&pubkey), 128., 4.);
             ui.label(RichText::new(&name).font(FontId::new(15., FontFamily::Name("bold".into()))).color(p.text));
         });
         let w = ui.available_width();

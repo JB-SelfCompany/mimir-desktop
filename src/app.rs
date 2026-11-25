@@ -8,7 +8,8 @@ use crate::{
 };
 use eframe::egui;
 use mimir::MimirApp;
-use std::{sync::{mpsc::{Receiver, TryRecvError}, Arc}, time::{Duration, Instant}};
+use crate::platform::notify::{self, Focus};
+use std::{sync::{mpsc::{Receiver, Sender, TryRecvError}, Arc, Mutex}, time::{Duration, Instant}};
 
 pub struct MimirDesktop {
     pub core: Arc<MimirApp>,
@@ -18,12 +19,16 @@ pub struct MimirDesktop {
     /// unreachable mediator (dial and request timeouts, proof-of-work) must not hold up 1:1 jobs. Same result channel.
     pub group_worker: Worker,
     pub rx: Receiver<Event>,
+    /// The sender of `rx`, for events from outside the core (links from other launches).
+    pub events: Sender<Event>,
     pub state: AppState,
     pub settings: Settings,
     pub paths: DataPaths,
     pub lang: Lang,
     /// Voice and audio playback (its own thread).
     pub player: crate::media::player::Player,
+    /// What the window shows, for the notifications the core's callback thread decides (`core::events::Bridge`).
+    pub focus: Arc<Mutex<Focus>>,
     /// Test data dir, dropped (deleted) with the app.
     #[cfg(test)]
     pub test_tmp: Option<tempfile::TempDir>,
@@ -32,26 +37,38 @@ pub struct MimirDesktop {
 /// The window (I2): `backup::restore` (recovery, and a staged import that can take minutes) runs on a thread behind a
 /// progress screen, then the core opens. eframe shows the window only after its first frame, so nothing may block here.
 pub enum Startup {
-    Restoring { lang: Lang, rx: Receiver<Option<Result<bool, String>>> },
+    /// `ext`: what other launches ask, handed to the app once it opens.
+    Restoring { lang: Lang, rx: Receiver<Option<Result<bool, String>>>, ext: Option<Receiver<crate::platform::Ext>> },
     /// Another instance holds the restore lock: say so and close.
     Busy(Lang),
     Ready(Box<MimirDesktop>),
 }
 
 impl Startup {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// `link`: this launch's own link, handled like a forwarded one once the app is up.
+    pub fn new(cc: &eframe::CreationContext<'_>, instance: crate::platform::Instance, link: Option<String>) -> Self {
         let root = DataPaths::default_for_user().root;
         // The settings as they were before a staged import replaces them: only the screen's language and theme.
         let settings = Settings::load(&DataPaths::under(&root).settings_file);
         theme::install(&cc.egui_ctx);
         cc.egui_ctx.set_theme(theme_preference(settings.dark));
+        crate::platform::tray::remember_window(cc);
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(crate::backup::restore(&DataPaths::under(&root)));
             ctx.request_repaint();
         });
-        Startup::Restoring { lang: settings.lang.unwrap_or_else(Lang::from_system), rx }
+        let (ext_tx, ext) = std::sync::mpsc::channel();
+        if let Some(link) = link {
+            let _ = ext_tx.send(crate::platform::Ext::Link(link));
+        }
+        let ctx = cc.egui_ctx.clone();
+        instance.listen(move |msg| {
+            let _ = ext_tx.send(msg.map_or(crate::platform::Ext::Show, crate::platform::Ext::Link));
+            ctx.request_repaint();
+        });
+        Startup::Restoring { lang: settings.lang.unwrap_or_else(Lang::from_system), rx, ext: Some(ext) }
     }
 }
 
@@ -66,13 +83,23 @@ impl eframe::App for Startup {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if let Startup::Restoring { lang, rx } = self {
-            let next = match rx.try_recv() {
-                Ok(Some(restored)) => Some(Startup::Ready(Box::new(MimirDesktop::open(ui.ctx(), restored)))),
-                Ok(None) => Some(Startup::Busy(*lang)),
-                Err(TryRecvError::Disconnected) => Some(Startup::Ready(Box::new(MimirDesktop::open(ui.ctx(), Err("restore stopped".into()))))),
+        if let Startup::Restoring { lang, rx, ext } = self {
+            let restored = match rx.try_recv() {
+                Ok(r) => Some(r),
+                Err(TryRecvError::Disconnected) => Some(Some(Err("restore stopped".into()))),
                 Err(TryRecvError::Empty) => None,
             };
+            let next = restored.map(|r| match r {
+                Some(restored) => {
+                    let mut app = MimirDesktop::open(ui.ctx(), restored);
+                    if let Some(ext) = ext.take() {
+                        crate::platform::relay(ext, app.events.clone(), ui.ctx().clone());
+                    }
+                    app.state.tray = crate::platform::tray::spawn(app.events.clone(), ui.ctx().clone(), app.lang);
+                    Startup::Ready(Box::new(app))
+                }
+                None => Startup::Busy(*lang),
+            });
             if let Some(next) = next {
                 *self = next;
             }
@@ -142,14 +169,25 @@ impl MimirDesktop {
         let ffmpeg = if cfg!(test) { None } else { crate::media::ffmpeg::locate() };
         let state = AppState { chats: build_chat_list(&core, lang), ffmpeg, ..Default::default() };
         let player = crate::media::player::Player::spawn(ctx.clone(), worker.clone(), lang);
-        let mut app = MimirDesktop { core, worker, group_worker, rx, state, settings, paths, lang, player, #[cfg(test)] test_tmp: None };
+        let focus = Arc::new(Mutex::new(Focus { chat: None, focused: false, lang }));
+        let mut app = MimirDesktop { core, worker, group_worker, rx, events: tx.clone(), state, settings, paths, lang, player, focus, #[cfg(test)] test_tmp: None };
         app.refresh_requests();
         invites::refresh(&mut app);
         if let Some(cfg) = net_cfg {
-            net::start(&app.worker, cfg, Bridge::new(tx, ctx.clone()));
+            let (events, wake) = (tx.clone(), ctx.clone());
+            let show = move |title, body| notify::show(title, body, events.clone(), wake.clone());
+            let bridge = Bridge::new(tx, ctx.clone()).notifying(&app.core, app.focus.clone(), show);
+            net::start(&app.worker, cfg, bridge);
         }
         app
     }
+
+    /// Leaves for real: the close this sends is not turned into hiding to the tray.
+    pub fn quit(&mut self, ctx: &egui::Context) {
+        self.state.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
     /// A success message in the status line for a few seconds.
     pub fn notice(&mut self, key: crate::i18n::Key) {
         self.notice_text(crate::i18n::tr(self.lang, key).to_string());
@@ -345,6 +383,8 @@ impl MimirDesktop {
                         chat.reactions.clear();
                     }
                 }
+                Event::External(ext) => crate::platform::handle(self, ctx, ext),
+                Event::Quit => self.quit(ctx),
                 Event::WorkDone(WorkResult::Started) => {
                     self.state.core_started = true;
                     self.apply_live();
@@ -436,6 +476,7 @@ impl MimirDesktop {
                         self.error_text(format!("{what}: {err}"));
                     }
                 }
+                Event::IncomingCall { pubkey } => self.state.incoming_call = Some((pubkey.clone(), Instant::now())),
                 Event::DraftSynced { chat_type, chat_id } => {
                     // CG §1j: 0 = contact (or Saved Messages), 1 = group; anything else is not a chat we know.
                     let key = match chat_type {
@@ -614,6 +655,16 @@ pub fn theme_preference(dark: Option<bool>) -> egui::ThemePreference {
 impl eframe::App for MimirDesktop {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        let tray_up = self.state.tray.load(std::sync::atomic::Ordering::Relaxed);
+        if crate::platform::tray::on_close_request(ctx, tray_up, self.state.quitting) {
+            self.state.hidden = true;
+        } else if ctx.input(|i| i.raw.events.contains(&egui::Event::WindowFocused(true))) {
+            self.state.hidden = false; // brought back by the OS (a Wayland taskbar, say), not by us
+        }
+        let chat = self.state.open_chat.as_ref().map(|c| c.key);
+        // Live input: while hidden, eframe runs `logic` alone and `i.focused` keeps the last shown frame's value.
+        let focused = !self.state.hidden && ctx.input(|i| i.raw.focused && i.viewport().minimized != Some(true));
+        *self.focus.lock().unwrap_or_else(|p| p.into_inner()) = Focus { chat, focused, lang: self.lang };
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

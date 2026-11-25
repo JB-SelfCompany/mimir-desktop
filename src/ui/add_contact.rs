@@ -58,6 +58,12 @@ fn submit(app: &mut MimirDesktop) {
     }));
 }
 
+/// Opens the dialog filled from a contact link (Android: a `mimir://mm/u/…` link opens AddContactActivity filled in).
+pub fn open_prefilled(app: &mut MimirDesktop, pubkey: &[u8], name: Option<String>) {
+    app.state.add_dialog = AddContactDialog { name: name.unwrap_or_default(), key: hex::encode(pubkey), ..Default::default() };
+    app.state.show_add_contact = true;
+}
+
 pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
     if !app.state.show_add_contact {
         return;

@@ -124,8 +124,8 @@ pub fn font(app: &mut MimirDesktop, ui: &mut egui::Ui) {
     }
     ui.add_space(12.);
     ui.label(RichText::new(tr(lang, Key::FontPreviewLabel).to_uppercase()).size(14.).color(p.text));
-    // An incoming bubble on the chat canvas, as the chat draws it (bubble::geom, radius 4, tail bottom-left).
-    Frame::NONE.fill(p.canvas).inner_margin(8).corner_radius(4).show(ui, |ui| {
+    // An incoming bubble on the chat canvas, as the chat draws it (bubble::geom, radius 2, tail bottom-left).
+    Frame::NONE.fill(p.canvas).inner_margin(8).corner_radius(2).show(ui, |ui| {
         let text = tr(lang, Key::FontPreviewText);
         let width = ui.available_width();
         let galley = ui.painter().layout(text.to_string(), FontId::proportional(app.settings.message_font), p.text, width - 40.);
