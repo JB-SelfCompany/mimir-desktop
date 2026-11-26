@@ -9,7 +9,7 @@ use crate::{
     ui::{record_bar::{check, cross, round_button}, theme::{self, Palette}, voice_bubble::clock},
 };
 use eframe::egui::{self, vec2, Align, Color32, ComboBox, Id, Image, Layout, Rect, Role, Sense, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo};
-use std::{sync::mpsc::{self, Receiver, TryRecvError}, time::Duration};
+use std::{sync::mpsc::{self, Receiver, TryRecvError}, time::{Duration, Instant}};
 
 /// The video-message wire format (Android stageVideoForSending).
 const VIDEO_NAME: &str = "video_message.mp4";
@@ -113,6 +113,11 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context, p: &Palette) {
         let started = cam.elapsed_ms() > 0;
         v.reset();
         app.error_text(device_error(lang, &e, started));
+        return;
+    }
+    if cam.stalled(Instant::now()) {
+        v.reset(); // ffmpeg is killed and the take deleted
+        app.error_text(tr(lang, K::CameraNotResponding).to_string());
         return;
     }
     if let Some(img) = cam.take_frame() {
@@ -387,6 +392,25 @@ mod tests {
         h.get_by_label(CAM).click();
         wait_until(&mut h, "error reported", |h| h.state().state.status.is_some());
         assert_eq!(h.state().state.status.as_ref().unwrap().0, "Не удалось сохранить запись: Device lost", "mid-take: it had started");
+    }
+
+    #[test]
+    fn stalled_camera_is_given_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut h = saved(Some(fake_ffmpeg(tmp.path(), 0, "", None)));
+        let file = Rc::new(RefCell::new(None));
+        let seen = file.clone();
+        set_camera(move |out| {
+            *seen.borrow_mut() = Some(out.clone());
+            Camera::fake_frozen(4_000, &["cam"], out, camera::STALL)
+        });
+        h.get_by_label(CAM).click();
+        wait_until(&mut h, "stall reported", |h| h.state().state.status.is_some());
+        assert_eq!(h.state().state.status.as_ref().unwrap().0, "Камера не отвечает");
+        assert!(!h.state().state.composer.video.recording(), "the take is stopped");
+        let f = file.borrow().clone().unwrap();
+        wait_until(&mut h, "and deleted", |_| !f.exists());
+        assert_eq!(msgs(&h), 0);
     }
 
     #[test]

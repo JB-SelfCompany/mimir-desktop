@@ -128,9 +128,18 @@ const DIAL_TIMEOUT_MS: i64 = 40_000;
 pub fn on_event(app: &mut MimirDesktop, ctx: &egui::Context, e: &Event) {
     match e {
         Event::IncomingCall { pubkey } => {
-            // Busy, or the same call announced again: another call rings on unanswered until its caller gives up.
-            // ponytail: the second caller is not told we are busy (Android shows «call already ongoing» only locally).
+            // The same call announced again.
+            if app.state.call.as_ref().is_some_and(|c| c.pubkey == *pubkey) {
+                return;
+            }
+            // Busy: declined at once (Android's decline), without a dialog or a ring, and left as missed in its chat.
+            // ponytail: the caller hears a plain decline; the protocol has no «busy».
             if !idle(app) {
+                let _ = app.core.answer_call(pubkey.clone(), false);
+                if let Some(contact) = app.core.get_contact_by_pubkey(pubkey.clone()) {
+                    let t = now_ms();
+                    store_record(app, contact.id, true, t, t);
+                }
                 return;
             }
             app.state.call = Some(new_call(app, pubkey, true));
@@ -195,8 +204,13 @@ fn record(app: &mut MimirDesktop, call: &Call) {
     let Some(contact_id) = call.contact_id else { return };
     let send = call.answered_ms.unwrap_or(call.started_ms);
     let edit = if call.answered_ms.is_some() { now_ms() } else { send };
+    store_record(app, contact_id, call.incoming, send, edit);
+}
+
+/// Stores a call record row (type 2, lasting `edit - send`) in the contact's chat and shows it.
+fn store_record(app: &mut MimirDesktop, contact_id: i64, incoming: bool, send: i64, edit: i64) {
     let guid = app.core.generate_guid(send, vec![]);
-    match app.core.add_local_message(contact_id, guid, 0, call.incoming, true, send, edit, 2, vec![]) {
+    match app.core.add_local_message(contact_id, guid, 0, incoming, true, send, edit, 2, vec![]) {
         Ok(id) => {
             if let Some(chat) = app.state.open_chat.as_mut().filter(|c| c.key == ChatKey::Contact(contact_id)) {
                 chat.timeline.push_if_newer(app.core.get_message(id));
@@ -885,6 +899,25 @@ mod tests {
         h.run();
         assert!(h.state().state.call.is_none());
         assert_eq!(records(&h), [(true, 0), (true, 0)]);
+    }
+
+    #[test]
+    fn second_caller_is_declined_and_missed() {
+        let mut boris = 0;
+        let mut h = chat_with(true, |core, _| boris = core.add_contact(vec![8; 32], "Боря".into()).unwrap());
+        send(&mut h, Event::IncomingCall { pubkey: ANYA.to_vec() });
+        send(&mut h, status(CallStatus::InCall));
+        send(&mut h, Event::IncomingCall { pubkey: ANYA.to_vec() });
+        send(&mut h, Event::IncomingCall { pubkey: vec![8; 32] });
+        let call = h.state().state.call.as_ref().unwrap();
+        assert!(call.pubkey == ANYA && matches!(call.phase, Phase::Active(_)), "the running call goes on");
+        let core = h.state().core.clone();
+        let missed: Vec<_> = core.get_messages(boris, i64::MAX, 10).into_iter().map(|m| (m.msg_type, m.incoming, m.edit_time - m.send_time)).collect();
+        assert_eq!(missed, [(2, true, 0)], "a missed call in Боря's chat");
+        assert!(records(&h).is_empty(), "Аня's re-announced call leaves nothing");
+        // The core's hang-up for the declined caller.
+        send(&mut h, Event::CallStatusChanged { status: CallStatus::Hangup, pubkey: Some(vec![8; 32]) });
+        assert!(h.state().state.call.is_some());
     }
 
     #[test]

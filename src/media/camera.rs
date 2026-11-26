@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{atomic::{AtomicBool, AtomicU64, Ordering}, mpsc::{self, Receiver}, Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 /// Android VideoMessageRecorder.CAPTURE_FPS and VideoMessageTranscoder.SIZE / VIDEO_BITRATE / AUDIO_BITRATE.
@@ -28,7 +29,11 @@ pub const NO_CAMERA: &str = "No camera found";
 pub const TOO_SHORT: &str = recorder::TOO_SHORT;
 const CANCELLED: &str = "cancelled";
 /// How long `finish` waits for ffmpeg to close the mp4 after `q`, then the take is given up.
-const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 3 } else { 10 });
+const STOP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 10 });
+/// A take with no preview frame for this long is given up: the camera is not responding.
+pub const STALL: Duration = Duration::from_secs(5);
+/// `STALL` before the first frame: a cold camera can take a while to open.
+pub const FIRST_FRAME: Duration = Duration::from_secs(10);
 const NOT_STOPPED: &str = "ffmpeg did not stop";
 
 /// Where the picture and sound come from.
@@ -43,8 +48,8 @@ pub enum Source {
 }
 
 /// The ffmpeg command line of a take into `out` (a new path), with `encoder` from `h264_encoder`. Both outputs stop
-/// at the 60 s cap by themselves.
-pub fn capture_args(src: &Source, encoder: &str, out: &Path) -> Vec<OsString> {
+/// at the 60 s cap by themselves. `vga` asks a DirectShow camera for 640x480 at 30 fps (other sources ignore it).
+pub fn capture_args(src: &Source, encoder: &str, out: &Path, vga: bool) -> Vec<OsString> {
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error"].map(String::from).to_vec();
     let audio = match src {
         Source::Dshow { camera, mic } => {
@@ -52,7 +57,11 @@ pub fn capture_args(src: &Source, encoder: &str, out: &Path) -> Vec<OsString> {
                 Some(m) => format!("video={camera}:audio={m}"),
                 None => format!("video={camera}"),
             };
-            a.extend(["-f", "dshow", "-rtbufsize", "64M", "-i"].map(String::from));
+            a.extend(["-f", "dshow", "-rtbufsize", "64M"].map(String::from));
+            if vga {
+                a.extend(["-video_size", "640x480", "-framerate", "30"].map(String::from));
+            }
+            a.push("-i".into());
             a.push(input);
             mic.as_ref().map(|_| "0:a")
         }
@@ -137,34 +146,43 @@ fn real_mic(name: &str) -> bool {
     !name.contains(':') && !["stereo mix", "стерео микшер", "loopback"].iter().any(|l| n.contains(l))
 }
 
-/// Video4Linux capture nodes (index 0: the other nodes of a webcam carry metadata), as /dev paths.
-fn v4l2_devices() -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir("/sys/class/video4linux")
+/// Video4Linux capture nodes under `sys` (/sys/class/video4linux; index 0: the other nodes of a webcam carry
+/// metadata): their name (else the /dev path) and /dev path.
+// ponytail: two identical webcams show the same name twice and the picker can only reach the first; label them
+// apart when someone has two.
+fn v4l2_devices(sys: &Path) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = std::fs::read_dir(sys)
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| std::fs::read_to_string(e.path().join("index")).is_ok_and(|i| i.trim() == "0"))
-        .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
+        .map(|e| {
+            let dev = format!("/dev/{}", e.file_name().to_string_lossy());
+            let name = std::fs::read_to_string(e.path().join("name")).map(|n| n.trim().to_string()).unwrap_or_default();
+            (if name.is_empty() { dev.clone() } else { name }, dev)
+        })
         .collect();
-    v.sort();
+    v.sort_by(|a, b| a.1.cmp(&b.1));
     v
 }
 
-/// The cameras there are, and the source for `want` (else the first camera).
+/// The cameras there are (as the picker names them), the one for `want` (else the first camera) and its source.
 // ponytail: the microphone is the system's first real (dshow) or default (ALSA) one; no picker for it.
-fn resolve(bin: &Path, want: Option<&str>) -> Result<(Vec<String>, Source), String> {
+fn resolve(bin: &Path, want: Option<&str>) -> Result<(Vec<String>, String, Source), String> {
     if std::env::var("MIMIR_TEST_CAMERA").is_ok_and(|v| v == "testsrc") {
-        return Ok((vec!["testsrc".into()], Source::Test));
+        return Ok((vec!["testsrc".into()], "testsrc".into(), Source::Test));
     }
-    let (cams, mic) = if cfg!(windows) {
+    // (name, device): one and the same for DirectShow.
+    let (cams, mic): (Vec<(String, String)>, _) = if cfg!(windows) {
         let out = ffmpeg::command(bin).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).output().map_err(|e| e.to_string())?;
-        parse_dshow(&String::from_utf8_lossy(&out.stderr))
+        let (cams, mic) = parse_dshow(&String::from_utf8_lossy(&out.stderr));
+        (cams.into_iter().map(|c| (c.clone(), c)).collect(), mic)
     } else {
-        (v4l2_devices(), None)
+        (v4l2_devices(Path::new("/sys/class/video4linux")), None)
     };
-    let pick = want.and_then(|w| cams.iter().find(|c| *c == w)).or(cams.first()).cloned().ok_or(NO_CAMERA)?;
-    let src = if cfg!(windows) { Source::Dshow { camera: pick, mic } } else { Source::V4l2 { device: pick } };
-    Ok((cams, src))
+    let (name, device) = want.and_then(|w| cams.iter().find(|(n, _)| n == w)).or(cams.first()).cloned().ok_or(NO_CAMERA)?;
+    let src = if cfg!(windows) { Source::Dshow { camera: device, mic } } else { Source::V4l2 { device } };
+    Ok((cams.into_iter().map(|(n, _)| n).collect(), name, src))
 }
 
 #[derive(Default)]
@@ -175,6 +193,8 @@ struct Shared {
     /// `finish` was called: ffmpeg was told to stop, or must not start.
     stopping: AtomicBool,
     frames: AtomicU64,
+    /// When the last preview frame came (or ffmpeg started); `None` while the device is looked up.
+    last_frame: Mutex<Option<Instant>>,
     /// The newest preview frame not yet shown.
     frame: Mutex<Option<Vec<u8>>>,
     cameras: Mutex<Vec<String>>,
@@ -252,6 +272,14 @@ impl Camera {
         matches!(*self.outcome.borrow(), Some(Ok(())))
     }
 
+    /// Whether the camera has sent no frame for `STALL` (`FIRST_FRAME` for the first one) by `now` while the take
+    /// runs: it is not responding.
+    pub fn stalled(&self, now: Instant) -> bool {
+        self.check();
+        let limit = if self.shared.frames.load(Ordering::SeqCst) == 0 { FIRST_FRAME } else { STALL };
+        self.outcome.borrow().is_none() && self.shared.last_frame.lock().unwrap().is_some_and(|t| now.saturating_duration_since(t) >= limit)
+    }
+
     /// Stops and throws the take away (its file is deleted): `Drop` does it.
     pub fn cancel(self) {}
 
@@ -284,6 +312,12 @@ impl Camera {
     /// A camera that "recorded" `ms` (a few bytes in `out`) on `cameras`, the first of them current; it ends when told.
     #[cfg(test)]
     pub fn fake(ms: u64, cameras: &[&str], out: PathBuf) -> Camera {
+        Self::fake_frozen(ms, cameras, out, Duration::ZERO)
+    }
+
+    /// `fake`, its last frame `ago` old (and no more coming).
+    #[cfg(test)]
+    pub fn fake_frozen(ms: u64, cameras: &[&str], out: PathBuf, ago: Duration) -> Camera {
         let cameras: Vec<String> = cameras.iter().map(|c| c.to_string()).collect();
         let path = out.clone();
         Self::spawn(out, Context::default(), move |sh| {
@@ -292,6 +326,7 @@ impl Camera {
             *sh.cameras.lock().unwrap() = cameras;
             *sh.frame.lock().unwrap() = Some(vec![128; PREVIEW * PREVIEW * 4]);
             sh.frames.store(ms * FPS / 1000, Ordering::SeqCst);
+            *sh.last_frame.lock().unwrap() = Some(Instant::now() - ago);
             while !sh.stopping.load(Ordering::SeqCst) {
                 if sh.cancelled.load(Ordering::SeqCst) {
                     return Err(CANCELLED.into());
@@ -332,17 +367,34 @@ impl Drop for Camera {
     }
 }
 
-/// The capture thread: finds the device, runs ffmpeg and passes its preview frames on until it exits.
-fn run(bin: &Path, out: &Path, sh: &Shared, ctx: &Context, resolve: impl FnOnce() -> Result<(Vec<String>, Source), String>) -> Result<(), String> {
-    let (cams, src) = resolve()?;
-    let current = match &src {
-        Source::Dshow { camera, .. } => camera.clone(),
-        Source::V4l2 { device } => device.clone(),
-        Source::Test => "testsrc".into(),
-    };
+/// The capture thread: finds the device, runs ffmpeg and passes its preview frames on until it exits. A DirectShow
+/// camera is asked for 640x480 at 30 fps first; one that refuses it before a frame gets ffmpeg's own choice.
+fn run(bin: &Path, out: &Path, sh: &Shared, ctx: &Context, resolve: impl FnOnce() -> Result<(Vec<String>, String, Source), String>) -> Result<(), String> {
+    let (cams, current, src) = resolve()?;
     *sh.cameras.lock().unwrap() = cams;
     *sh.camera.lock().unwrap() = Some(current);
-    let args = capture_args(&src, encoder(bin), out);
+    let encoder = encoder(bin);
+    vga_then_any(&src, sh, |vga| {
+        if !vga {
+            let _ = std::fs::remove_file(out); // no -y: ffmpeg would ask before overwriting
+        }
+        capture(bin, capture_args(&src, encoder, out, vga), sh, ctx)
+    })
+}
+
+/// `attempt(true)` (640x480 at 30 fps), then `attempt(false)` once for a DirectShow camera that failed before its
+/// first frame.
+fn vga_then_any(src: &Source, sh: &Shared, mut attempt: impl FnMut(bool) -> Result<(), String>) -> Result<(), String> {
+    let r = attempt(true);
+    if matches!(src, Source::Dshow { .. }) && sh.frames.load(Ordering::SeqCst) == 0 && r.as_ref().is_err_and(|e| e != CANCELLED) {
+        *sh.last_frame.lock().unwrap() = None; // the retry's own spawn restarts the clock: a slow first try must not trip the watchdog
+        return attempt(false);
+    }
+    r
+}
+
+/// One ffmpeg run with `args`, its preview frames passed on until it exits.
+fn capture(bin: &Path, args: Vec<OsString>, sh: &Shared, ctx: &Context) -> Result<(), String> {
     let (mut stdout, mut stderr) = {
         let mut child = sh.child.lock().unwrap();
         if sh.cancelled.load(Ordering::SeqCst) || sh.stopping.load(Ordering::SeqCst) {
@@ -351,6 +403,7 @@ fn run(bin: &Path, out: &Path, sh: &Shared, ctx: &Context, resolve: impl FnOnce(
         let mut c = ffmpeg::command(bin).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
         let io = (c.stdout.take().expect("piped stdout"), c.stderr.take().expect("piped stderr"));
         *child = Some(c);
+        *sh.last_frame.lock().unwrap() = Some(Instant::now()); // the camera has `FIRST_FRAME` to send its first frame
         io
     };
     // stderr is read beside stdout so neither pipe can fill up and stall ffmpeg.
@@ -362,6 +415,7 @@ fn run(bin: &Path, out: &Path, sh: &Shared, ctx: &Context, resolve: impl FnOnce(
     let mut px = vec![0u8; PREVIEW * PREVIEW * 4];
     while stdout.read_exact(&mut px).is_ok() {
         *sh.frame.lock().unwrap() = Some(px.clone());
+        *sh.last_frame.lock().unwrap() = Some(Instant::now());
         sh.frames.fetch_add(1, Ordering::SeqCst);
         ctx.request_repaint();
     }
@@ -396,18 +450,107 @@ mod tests {
         let x264 = "-c:v libx264 -preset veryfast -profile:v baseline -level 4.0";
         let windows = Source::Dshow { camera: "HD Webcam".into(), mic: Some("Microphone (Realtek)".into()) };
         let want = format!("-hide_banner -loglevel error -f dshow -rtbufsize 64M -i video=HD Webcam:audio=Microphone (Realtek) {FILTER} -map [enc] -map 0:a {x264} {TAIL}");
-        assert_eq!(joined(capture_args(&windows, "libx264", out)), want);
+        assert_eq!(joined(capture_args(&windows, "libx264", out, false)), want);
         // No DirectShow microphone: a silent take, and the LGPL build's Media Foundation encoder takes no profile.
         let silent = Source::Dshow { camera: "HD Webcam".into(), mic: None };
         let want = format!("-hide_banner -loglevel error -f dshow -rtbufsize 64M -i video=HD Webcam {FILTER} -map [enc] -c:v h264_mf {TAIL}");
-        assert_eq!(joined(capture_args(&silent, "h264_mf", out)), want);
+        assert_eq!(joined(capture_args(&silent, "h264_mf", out, false)), want);
         let linux = Source::V4l2 { device: "/dev/video0".into() };
         let want = format!("-hide_banner -loglevel error -f v4l2 -i /dev/video0 -f alsa -i default {FILTER} -map [enc] -map 1:a {x264} {TAIL}");
-        assert_eq!(joined(capture_args(&linux, "libx264", out)), want);
+        assert_eq!(joined(capture_args(&linux, "libx264", out, false)), want);
         let test = format!(
             "-hide_banner -loglevel error -re -f lavfi -i testsrc=size=640x480:rate=24 -re -f lavfi -i sine=frequency=440:sample_rate=44100 {FILTER} -map [enc] -map 1:a {x264} {TAIL}"
         );
-        assert_eq!(joined(capture_args(&Source::Test, "libx264", out)), test);
+        assert_eq!(joined(capture_args(&Source::Test, "libx264", out, false)), test);
+        // DirectShow is asked for 640x480 at 30 fps first (`run` retries without); the others ignore it.
+        let want = format!("-hide_banner -loglevel error -f dshow -rtbufsize 64M -video_size 640x480 -framerate 30 -i video=HD Webcam {FILTER} -map [enc] -c:v h264_mf {TAIL}");
+        assert_eq!(joined(capture_args(&silent, "h264_mf", out, true)), want);
+        assert_eq!(capture_args(&linux, "libx264", out, true), capture_args(&linux, "libx264", out, false));
+        assert_eq!(capture_args(&Source::Test, "libx264", out, true), capture_args(&Source::Test, "libx264", out, false));
+    }
+
+    #[test]
+    fn dshow_retries_once_without_vga() {
+        let cam = Source::Dshow { camera: "c".into(), mic: None };
+        let run = |src: &Source, frames: u64, first: Result<(), String>| {
+            let sh = Shared { frames: AtomicU64::new(frames), ..Default::default() };
+            *sh.last_frame.lock().unwrap() = Some(Instant::now() - FIRST_FRAME);
+            let mut asked = vec![];
+            let r = vga_then_any(src, &sh, |vga| {
+                asked.push(vga);
+                if !vga {
+                    assert!(sh.last_frame.lock().unwrap().is_none(), "the first try's time is dropped before the retry");
+                }
+                if vga { first.clone() } else { Err("second".into()) }
+            });
+            (asked, r)
+        };
+        assert_eq!(run(&cam, 0, Err("Could not set video options".into())), (vec![true, false], Err("second".into())), "refused: ffmpeg picks");
+        assert_eq!(run(&cam, 0, Ok(())), (vec![true], Ok(())));
+        assert_eq!(run(&cam, 12, Err("Device lost".into())), (vec![true], Err("Device lost".into())), "failed mid-take: no retry");
+        assert_eq!(run(&cam, 0, Err(CANCELLED.into())), (vec![true], Err(CANCELLED.into())));
+        let v4l2 = Source::V4l2 { device: "/dev/video0".into() };
+        assert_eq!(run(&v4l2, 0, Err("x".into())), (vec![true], Err("x".into())), "only DirectShow retries");
+    }
+
+    #[test]
+    fn v4l2_capture_nodes_by_name() {
+        let sys = tempfile::tempdir().unwrap();
+        let node = |n: &str, index: &str, name: Option<&str>| {
+            let d = sys.path().join(n);
+            std::fs::create_dir(&d).unwrap();
+            std::fs::write(d.join("index"), index).unwrap();
+            if let Some(name) = name {
+                std::fs::write(d.join("name"), name).unwrap();
+            }
+        };
+        node("video2", "0\n", None);
+        node("video1", "1\n", Some("Integrated Camera: Integrated C\n"));
+        node("video0", "0\n", Some("Integrated Camera: Integrated C\n"));
+        node("video3", "0\n", Some("\n"));
+        let found = v4l2_devices(sys.path());
+        let want = [("Integrated Camera: Integrated C", "/dev/video0"), ("/dev/video2", "/dev/video2"), ("/dev/video3", "/dev/video3")];
+        assert_eq!(found, want.map(|(n, d)| (n.to_string(), d.to_string())), "the metadata node is skipped; no name: the path");
+        assert_eq!(v4l2_devices(&sys.path().join("missing")), vec![], "no video4linux at all");
+    }
+
+    /// The fake's own last-frame time, once it is set.
+    fn last_frame(cam: &Camera) -> Instant {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(t) = *cam.shared.last_frame.lock().unwrap() {
+                return t;
+            }
+            assert!(Instant::now() < end, "the fake never set its frame time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn stall_watchdog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cam = Camera::fake(5_000, &["cam"], tmp.path().join("a.mp4"));
+        let t = last_frame(&cam);
+        assert!(!cam.stalled(t), "a frame just came");
+        assert!(!cam.stalled(t + STALL - Duration::from_millis(100)));
+        assert!(cam.stalled(t + STALL), "{STALL:?} without a frame");
+        // No frame yet (ffmpeg just started): a cold camera gets longer to open.
+        let cold = Camera::fake(0, &["cam"], tmp.path().join("b.mp4"));
+        let t = last_frame(&cold);
+        assert!(!cold.stalled(t + STALL), "{STALL:?} is not enough for the first frame");
+        assert!(!cold.stalled(t + FIRST_FRAME - Duration::from_millis(100)));
+        assert!(cold.stalled(t + FIRST_FRAME), "{FIRST_FRAME:?} without a first frame");
+        assert!(!Camera::failing(NO_CAMERA).stalled(t + FIRST_FRAME * 2), "no device, no frames to wait for");
+        // As `run` at the 60 s cap: over, so no longer waiting for frames.
+        let ended = Camera::spawn(PathBuf::new(), Context::default(), |sh| {
+            *sh.last_frame.lock().unwrap() = Some(Instant::now());
+            Ok(())
+        });
+        let end = Instant::now() + Duration::from_secs(5);
+        while !ended.ended() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!ended.stalled(Instant::now() + FIRST_FRAME * 2), "an ended take is not stalled");
     }
 
     #[test]
@@ -451,7 +594,7 @@ Error opening input file dummy."#;
         assert_eq!(Camera::fake(3_000, &["cam"], out.clone()).finish().unwrap().1, 3_000);
         assert_eq!(Camera::fake(2_990, &["cam"], out.clone()).finish().err().as_deref(), Some(TOO_SHORT), "2.958 s in whole frames");
         assert!(!out.exists(), "a too-short take leaves no file");
-        let args = joined(capture_args(&Source::Test, "libx264", &out));
+        let args = joined(capture_args(&Source::Test, "libx264", &out, false));
         assert_eq!(args.matches("-t 60 ").count(), 2, "ffmpeg itself stops both outputs at the cap: {args}");
     }
 
@@ -541,7 +684,7 @@ Error opening input file dummy."#;
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("v.mp4");
         let (path, ctx) = (out.clone(), Context::default());
-        let cam = Camera::spawn(out.clone(), ctx.clone(), move |sh| run(&bin, &path, sh, &ctx, || Ok((vec!["testsrc".into()], Source::Test))));
+        let cam = Camera::spawn(out.clone(), ctx.clone(), move |sh| run(&bin, &path, sh, &ctx, || Ok((vec!["testsrc".into()], "testsrc".into(), Source::Test))));
         let end = Instant::now() + Duration::from_secs(20);
         while cam.elapsed_ms() < 4_000 && Instant::now() < end {
             assert_eq!(cam.failed(), None);

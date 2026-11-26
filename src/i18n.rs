@@ -417,6 +417,16 @@ pub enum Key {
     CheckForUpdatesDesc,
     UpdateNow,
     UpdateFailed,
+    /// The updater's own failures (ours), after «UpdateFailed»'s colon.
+    UpdateNoArchive,
+    UpdateMissing,
+    UpdateNotInSums,
+    UpdateHashMismatch,
+    UpdateNoExe,
+    UpdateReinstall,
+    CameraNotResponding,
+    /// A deleted channel's header subtitle (ours: Android shows the counts).
+    ChannelDeleted,
 }
 
 /// Month names in the genitive ("12 ноября"), 1-based.
@@ -1234,6 +1244,22 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::UpdateNow, Lang::En) => "Update",
         (Key::UpdateFailed, Lang::Ru) => "Обновление не установлено: %1$s",
         (Key::UpdateFailed, Lang::En) => "Update not installed: %1$s",
+        (Key::UpdateNoArchive, Lang::Ru) => "в выпуске нет архива для этой системы",
+        (Key::UpdateNoArchive, Lang::En) => "the release has no archive for this system",
+        (Key::UpdateMissing, Lang::Ru) => "в выпуске нет %1$s",
+        (Key::UpdateMissing, Lang::En) => "%1$s is missing from the release",
+        (Key::UpdateNotInSums, Lang::Ru) => "%1$s нет в %2$s",
+        (Key::UpdateNotInSums, Lang::En) => "%1$s is not in %2$s",
+        (Key::UpdateHashMismatch, Lang::Ru) => "%1$s: контрольная сумма SHA-256 не совпадает",
+        (Key::UpdateHashMismatch, Lang::En) => "%1$s: SHA-256 mismatch",
+        (Key::UpdateNoExe, Lang::Ru) => "в %1$s нет %2$s",
+        (Key::UpdateNoExe, Lang::En) => "%1$s has no %2$s",
+        (Key::UpdateReinstall, Lang::Ru) => "%1$s; не удалось вернуть %2$s (%3$s): переустановите Мимир",
+        (Key::UpdateReinstall, Lang::En) => "%1$s; restoring %2$s failed (%3$s): reinstall Mimir",
+        (Key::CameraNotResponding, Lang::Ru) => "Камера не отвечает",
+        (Key::CameraNotResponding, Lang::En) => "Camera is not responding",
+        (Key::ChannelDeleted, Lang::Ru) => "Канал удалён",
+        (Key::ChannelDeleted, Lang::En) => "Channel deleted",
     }
 }
 

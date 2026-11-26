@@ -150,6 +150,11 @@ pub fn system_text(data: &[u8], members: &Members, lang: Lang) -> Option<String>
     })
 }
 
+/// The mediator's «chat deleted» system row.
+pub fn deletes_chat(msg_type: i32, data: Option<&[u8]>) -> bool {
+    msg_type == SYSTEM && matches!(parse_system_message(data.unwrap_or_default().to_vec()), Ok(SystemMessage::ChatDeleted { .. }))
+}
+
 /// Rows a timeline or preview skips: reactions, and `MessageDeleted` notices.
 pub fn hidden(msg_type: i32, data: Option<&[u8]>) -> bool {
     msg_type == REACTION

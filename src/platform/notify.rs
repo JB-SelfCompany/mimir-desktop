@@ -41,7 +41,7 @@ pub struct Focus {
 /// Title and body of the notification `ev` calls for, if any (Android rules: not for the open chat while the window
 /// has focus, muted chats, our own or already read messages (a sibling's catch-up brings rows read on the phone),
 /// reactions, call records or system rows). A call ignores mute: it is urgent; it is not announced while the window
-/// has focus (its dialog is up).
+/// has focus (its dialog is up), nor over another call (`ui::call` declines it).
 pub fn decide(core: &MimirApp, ev: &Event, focus: &Focus) -> Option<(String, String)> {
     let lang = focus.lang;
     let open = |key: ChatKey| focus.focused && focus.chat == Some(key);
@@ -74,7 +74,7 @@ pub fn decide(core: &MimirApp, ev: &Event, focus: &Focus) -> Option<(String, Str
             Some((tr(lang, Key::GroupJoinTitle).to_string(), format!("{} — {inviter}", inv.chat_name)))
         }
         // The window in front shows the call's own dialog instead.
-        Event::IncomingCall { pubkey } if !focus.focused => Some((contact_name(core, pubkey), tr(lang, Key::IncomingCall).to_string())),
+        Event::IncomingCall { pubkey } if !focus.focused && !focus.in_call => Some((contact_name(core, pubkey), tr(lang, Key::IncomingCall).to_string())),
         _ => None,
     }
 }
@@ -274,6 +274,7 @@ mod tests {
         let away = Focus { focused: false, ..FOCUSED };
         assert_eq!(decide(&core, &call, &away), some("Аня", "Входящий звонок"));
         assert_eq!(decide(&core, &call, &FOCUSED), None, "the window shows the call dialog instead");
+        assert_eq!(decide(&core, &call, &Focus { in_call: true, ..away }), None, "busy: declined without a word");
         assert_eq!(decide(&core, &call, &open(false)), some("Аня", "Входящий звонок"), "its chat open, window away");
         core.set_contact_muted(c, true).unwrap();
         assert_eq!(decide(&core, &call, &away), some("Аня", "Входящий звонок"), "a call ignores mute");

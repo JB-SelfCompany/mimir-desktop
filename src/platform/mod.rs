@@ -108,19 +108,32 @@ pub fn register_app_id(root: &std::path::Path) {
 #[cfg(not(windows))]
 pub fn register_app_id(_root: &std::path::Path) {}
 
-/// Makes `mimir://` links open this executable, for the current user only; failures are only logged.
+/// The user-level desktop entry of a tar.gz install: `exe` handles `mimir://`, with the icon at `icon`.
 /// ponytail: `exe` goes into Exec= quoted but unescaped; a path with `"`, `$`, `\` or `%` breaks the entry.
+#[cfg(any(test, target_os = "linux"))]
+fn desktop_entry(exe: &std::path::Path, icon: &std::path::Path) -> String {
+    format!(
+        "[Desktop Entry]\nType=Application\nName=Mimir\nExec=\"{}\" %u\nIcon={}\nTerminal=false\nCategories=Network;InstantMessaging;\nMimeType=x-scheme-handler/mimir;\n",
+        exe.display(),
+        icon.display()
+    )
+}
+
+/// Makes `mimir://` links open this executable, for the current user only, and gives its entry the app icon (an
+/// unthemed `~/.local/share/icons/mimir-desktop.png`, as the .deb's is in /usr/share/pixmaps; it is 144 px, no
+/// hicolor size); failures are only logged.
 #[cfg(target_os = "linux")]
 pub fn register_scheme() {
     if !update::registers_scheme(update::this_install()) {
         return;
     }
     let (Ok(exe), Some(dirs)) = (std::env::current_exe(), directories::BaseDirs::new()) else { return };
-    let apps = dirs.data_dir().join("applications");
-    let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Mimir\nExec=\"{}\" %u\nTerminal=false\nCategories=Network;InstantMessaging;\nMimeType=x-scheme-handler/mimir;\n",
-        exe.display()
-    );
+    let (apps, icons) = (dirs.data_dir().join("applications"), dirs.data_dir().join("icons"));
+    let icon = icons.join("mimir-desktop.png");
+    if let Err(e) = std::fs::create_dir_all(&icons).and_then(|_| std::fs::write(&icon, tray::ICON)) {
+        tracing::warn!("app icon not written: {e}");
+    }
+    let entry = desktop_entry(&exe, &icon);
     if let Err(e) = std::fs::create_dir_all(&apps).and_then(|_| std::fs::write(apps.join("mimir-desktop.desktop"), entry)) {
         tracing::warn!("mimir:// registration failed: {e}");
         return;
@@ -175,6 +188,15 @@ mod tests {
         assert_eq!(h.state().state.join.as_ref().map(|j| j.link.chat_id), Some(123456));
         assert!(h.query_by_label("Приглашение в группу").is_some());
         assert!(!h.state().state.show_add_contact);
+    }
+
+    #[test]
+    fn desktop_entry_has_the_icon() {
+        let entry = desktop_entry(std::path::Path::new("/home/u/mimir/mimir-desktop"), std::path::Path::new("/home/u/.local/share/icons/mimir-desktop.png"));
+        assert_eq!(
+            entry,
+            "[Desktop Entry]\nType=Application\nName=Mimir\nExec=\"/home/u/mimir/mimir-desktop\" %u\nIcon=/home/u/.local/share/icons/mimir-desktop.png\nTerminal=false\nCategories=Network;InstantMessaging;\nMimeType=x-scheme-handler/mimir;\n"
+        );
     }
 
     #[test]

@@ -177,40 +177,41 @@ fn text(e: impl ToString) -> String {
 /// Downloads the archive \`install\` updates from (next to \`exe\`: the swap is a rename on one file system), verifies it
 /// and swaps its executable in for \`exe\`.
 /// ponytail: the archive is downloaded whole (ffmpeg included) for the one executable in it.
-pub fn install(release: &Release, install: Install, exe: &Path) -> Result<(), String> {
-    let asset = asset(release, install).ok_or("no archive for this system")?;
-    let sums_asset = release.assets.iter().find(|a| a.name == SUMS).ok_or(format!("no {SUMS} in the release"))?;
+pub fn install(release: &Release, install: Install, exe: &Path, lang: Lang) -> Result<(), String> {
+    let missing = |name: &str| trf(lang, Key::UpdateMissing, &[name]);
+    let asset = asset(release, install).ok_or_else(|| tr(lang, Key::UpdateNoArchive).to_string())?;
+    let sums_asset = release.assets.iter().find(|a| a.name == SUMS).ok_or_else(|| missing(SUMS))?;
     let mut sums = Vec::new();
     if !get(&sums_asset.browser_download_url, &mut sums)? {
-        return Err(format!("{SUMS}: 404"));
+        return Err(missing(SUMS));
     }
     let archive = with_suffix(exe, ".download");
     let result = File::create(&archive)
         .map_err(text)
         .and_then(|mut f| get(&asset.browser_download_url, &mut f))
-        .and_then(|found| if found { Ok(()) } else { Err(format!("{}: 404", asset.name)) })
-        .and_then(|()| apply(&archive, &asset.name, &String::from_utf8_lossy(&sums), exe));
+        .and_then(|found| if found { Ok(()) } else { Err(missing(&asset.name)) })
+        .and_then(|()| apply(&archive, &asset.name, &String::from_utf8_lossy(&sums), exe, lang));
     let _ = fs::remove_file(&archive);
     result
 }
 
 /// Checks \`archive\` (the asset \`name\`) against \`sums\`, takes the executable out of it and swaps it in for \`exe\`.
-fn apply(archive: &Path, name: &str, sums: &str, exe: &Path) -> Result<(), String> {
-    let want = expected_hash(sums, name).ok_or(format!("{name} is not in {SUMS}"))?;
+fn apply(archive: &Path, name: &str, sums: &str, exe: &Path, lang: Lang) -> Result<(), String> {
+    let want = expected_hash(sums, name).ok_or_else(|| trf(lang, Key::UpdateNotInSums, &[name, SUMS]))?;
     // ponytail: hashed in memory (the archive is tens of MB).
     let got = hex::encode(Sha256::digest(fs::read(archive).map_err(text)?));
     if !got.eq_ignore_ascii_case(want) {
-        return Err(format!("{name}: SHA-256 mismatch"));
+        return Err(trf(lang, Key::UpdateHashMismatch, &[name]));
     }
     let new = with_suffix(exe, ".new");
-    let result = extract(archive, name, &new).and_then(|()| swap(exe, &new).map_err(text));
+    let result = extract(archive, name, &new, lang).and_then(|()| swap(exe, &new, lang).map_err(text));
     let _ = fs::remove_file(&new);
     result
 }
 
 /// Writes the executable in \`archive\` (a .zip, else a .tar.gz) to \`to\`.
-fn extract(archive: &Path, name: &str, to: &Path) -> Result<(), String> {
-    let missing = || format!("{name} has no {EXE}");
+fn extract(archive: &Path, name: &str, to: &Path, lang: Lang) -> Result<(), String> {
+    let missing = || trf(lang, Key::UpdateNoExe, &[name, EXE]);
     if name.ends_with(".zip") {
         let mut zip = zip::ZipArchive::new(File::open(archive).map_err(text)?).map_err(text)?;
         for i in 0..zip.len() {
@@ -246,11 +247,11 @@ fn extract(archive: &Path, name: &str, to: &Path) -> Result<(), String> {
 
 /// Puts \`new\` in place of \`exe\`, which becomes \`exe.old\` (a running executable can be renamed, also on Windows);
 /// if \`new\` cannot be put there, \`exe\` is renamed back.
-fn swap(exe: &Path, new: &Path) -> io::Result<()> {
-    swap_with(exe, new, |from, to| fs::rename(from, to))
+fn swap(exe: &Path, new: &Path, lang: Lang) -> io::Result<()> {
+    swap_with(exe, new, lang, |from, to| fs::rename(from, to))
 }
 
-fn swap_with(exe: &Path, new: &Path, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
+fn swap_with(exe: &Path, new: &Path, lang: Lang, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
     let old = with_suffix(exe, ".old");
     let _ = fs::remove_file(&old);
     rename(exe, &old)?;
@@ -259,7 +260,8 @@ fn swap_with(exe: &Path, new: &Path, rename: impl Fn(&Path, &Path) -> io::Result
     if let Err(e) = put {
         if let Err(back) = rename(&old, exe) {
             tracing::error!("update rollback failed, {} is at {}: {back}", exe.display(), old.display());
-            return Err(io::Error::other(format!("{e}; restoring {} failed ({back}): reinstall Mimir", exe.display())));
+            let (e, exe, back) = (e.to_string(), exe.display().to_string(), back.to_string());
+            return Err(io::Error::other(trf(lang, Key::UpdateReinstall, &[&e, &exe, &back])));
         }
         return Err(e);
     }
@@ -366,10 +368,10 @@ pub fn start(app: &mut MimirDesktop, ctx: &egui::Context) {
         return;
     }
     app.state.update.installing = true;
-    let worker = app.worker.clone();
+    let (worker, lang) = (app.worker.clone(), app.lang);
     std::thread::spawn(move || {
         let exe = std::env::current_exe();
-        let err = exe.as_ref().map_err(text).and_then(|exe| install(&release, kind, exe)).err();
+        let err = exe.as_ref().map_err(text).and_then(|exe| install(&release, kind, exe, lang)).err();
         let exe = exe.ok();
         worker.submit(Box::new(move |_| WorkResult::UpdateInstalled { exe, err }));
     });
@@ -481,19 +483,20 @@ mod tests {
     fn checksum_mismatch_keeps_the_old_exe() {
         let (tmp, exe, archive, bytes) = setup(&[(&format!("d/{EXE}"), b"new")]);
         let sums = format!("{}  a.zip\n", sha(b"something else"));
-        let err = apply(&archive, "a.zip", &sums, &exe).unwrap_err();
-        assert!(err.contains("SHA-256"), "{err}");
+        let err = apply(&archive, "a.zip", &sums, &exe, Lang::Ru).unwrap_err();
+        assert_eq!(err, "a.zip: контрольная сумма SHA-256 не совпадает");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
         assert_eq!(leftovers(tmp.path()), ["a.zip", EXE], "no .new or .old");
         // A sums file without the archive is refused the same way.
-        assert!(apply(&archive, "a.zip", &format!("{}  b.zip", sha(&bytes)), &exe).is_err());
+        let err = apply(&archive, "a.zip", &format!("{}  b.zip", sha(&bytes)), &exe, Lang::En).unwrap_err();
+        assert_eq!(err, "a.zip is not in SHA256SUMS");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
     }
 
     #[test]
     fn verified_zip_swaps_the_exe() {
         let (tmp, exe, archive, bytes) = setup(&[("d/LICENSE", b"l"), ("d/ffmpeg.exe", b"f"), (&format!("d/{EXE}"), b"new")]);
-        apply(&archive, "a.zip", &format!("{}  a.zip\n", sha(&bytes)), &exe).unwrap();
+        apply(&archive, "a.zip", &format!("{}  a.zip\n", sha(&bytes)), &exe, Lang::En).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"new");
         assert_eq!(fs::read(with_suffix(&exe, ".old")).unwrap(), b"old", "the running exe moved aside");
         assert_eq!(leftovers(tmp.path()), ["a.zip".to_string(), EXE.into(), format!("{EXE}.old")], "only the exe is taken");
@@ -502,8 +505,8 @@ mod tests {
     #[test]
     fn archive_without_the_exe_keeps_the_old_one() {
         let (tmp, exe, archive, bytes) = setup(&[("d/README.md", b"r")]);
-        let err = apply(&archive, "a.zip", &format!("{}  a.zip", sha(&bytes)), &exe).unwrap_err();
-        assert!(err.contains(EXE), "{err}");
+        let err = apply(&archive, "a.zip", &format!("{}  a.zip", sha(&bytes)), &exe, Lang::Ru).unwrap_err();
+        assert_eq!(err, format!("в a.zip нет {EXE}"));
         assert_eq!(fs::read(&exe).unwrap(), b"old");
         assert_eq!(leftovers(tmp.path()), ["a.zip", EXE]);
     }
@@ -520,7 +523,7 @@ mod tests {
         let status = std::process::Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&src).arg("d").status().unwrap();
         assert!(status.success());
         let sums = format!("{}  a.tar.gz", sha(&fs::read(&archive).unwrap()));
-        apply(&archive, "a.tar.gz", &sums, &exe).unwrap();
+        apply(&archive, "a.tar.gz", &sums, &exe, Lang::En).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"new");
         assert!(!with_suffix(&exe, ".new.d").exists(), "the scratch dir is gone");
     }
@@ -530,9 +533,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path().join(EXE);
         fs::write(&exe, b"old").unwrap();
-        let err = swap_with(&exe, &tmp.path().join("missing"), |from, to| if to == exe { Err(io::Error::other("locked")) } else { fs::rename(from, to) }).unwrap_err();
-        assert!(err.to_string().contains("reinstall") && err.to_string().contains("locked"), "{err}");
+        let err = swap_with(&exe, &tmp.path().join("missing"), Lang::Ru, |from, to| if to == exe { Err(io::Error::other("locked")) } else { fs::rename(from, to) }).unwrap_err();
+        assert!(err.to_string().ends_with("(locked): переустановите Мимир"), "{err}");
         assert!(!exe.exists());
+    }
+
+    #[test]
+    fn release_without_our_files_says_so_in_russian() {
+        let exe = Path::new("mimir-desktop.exe");
+        let zip = "mimir-desktop-v9.0.0-windows-x86_64.zip";
+        assert_eq!(install(&release("v9.0.0", &[SUMS]), Install::Windows, exe, Lang::Ru), Err("в выпуске нет архива для этой системы".into()));
+        assert_eq!(install(&release("v9.0.0", &[zip]), Install::Windows, exe, Lang::Ru), Err("в выпуске нет SHA256SUMS".into()));
+        assert_eq!(install(&release("v9.0.0", &[zip]), Install::Windows, exe, Lang::En), Err("SHA256SUMS is missing from the release".into()));
     }
 
     #[test]
@@ -550,7 +562,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path().join(EXE);
         fs::write(&exe, b"old").unwrap();
-        assert!(swap(&exe, &tmp.path().join("missing")).is_err());
+        assert!(swap(&exe, &tmp.path().join("missing"), Lang::En).is_err());
         assert_eq!(fs::read(&exe).unwrap(), b"old");
         assert!(!with_suffix(&exe, ".old").exists());
     }
@@ -599,7 +611,7 @@ mod tests {
         h.run();
         assert!(!Settings::load(&h.state().paths.settings_file).check_updates, "saved at once");
         h.get_by_label("Проверить обновления").click();
-        h.run();
+        h.run_steps(2); // not run(): the check's spinner repaints, and under load run() exceeds max_steps
         wait(&mut h, |a| !a.state.update.checking);
         assert!(h.query_by_label("Ошибка проверки обновлений: no network in tests").is_some());
         found(&mut h, true, Ok(None));

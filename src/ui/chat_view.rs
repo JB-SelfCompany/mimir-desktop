@@ -434,6 +434,11 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
     let path = row.and_then(|r| crate::media::avatar::resolve(data_dir, &r.avatar));
     let name = row.map_or("", |r| r.name.as_str());
     let is_channel = row.and_then(|r| r.group).is_some_and(|g| g.is_channel);
+    // A deleted channel: our own one gone read-only (deleted from another device), or the mediator's «chat deleted»
+    // row as the newest one (a subscriber online when it was deleted).
+    // ponytail: a subscriber offline at the deletion only sees DISCONNECTED (the subscribe fails «no such chat»).
+    let owned_ro = row.and_then(|r| r.group).is_some_and(|g| g.is_owner && (g.read_only || chat.status == GroupStatus::ReadOnly));
+    let deleted = is_channel && (owned_ro || chat.timeline.msgs.last().is_some_and(|m| group::deletes_chat(m.msg_type, m.data.as_deref())));
     let online = !group && online.contains(&chat.pubkey);
     let (mut toggle, mut more, mut calling) = (false, None, false);
     Frame::NONE.fill(p.toolbar).inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
@@ -458,7 +463,8 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
             let (members, on) = (chat.counts.0.to_string(), chat.counts.1.to_string());
             let status = if group {
                 Some(match (chat.status, is_channel) {
-                    // A subscriber is read-only by design: a channel always shows its counts (Android applyReadOnlyMode).
+                    // A subscriber is read-only by design: a channel shows its counts (Android applyReadOnlyMode) unless deleted.
+                    (_, true) if deleted => tr(lang, Key::ChannelDeleted).to_string(),
                     (_, true) => trf(lang, Key::ChannelSubscribers, &[&members, &on]),
                     (GroupStatus::ReadOnly, false) => tr(lang, Key::ReadOnly).to_string(),
                     (_, false) => trf(lang, Key::MemberCount, &[&members, &on]),
@@ -995,6 +1001,30 @@ mod tests {
         });
         assert!(h.query_by_role(Role::MultilineTextInput).is_some(), "the owner has a composer");
         assert!(h.query_by_label("0 подписчиков, 0 в сети").is_some());
+    }
+
+    #[test] fn deleted_channel_header_says_so() {
+        // (a) Our own channel, deleted from another device: read-only.
+        let mut h = group_chat(1, |core| {
+            core.save_group_chat(7, "Семья".into(), String::new(), None, vec![9; 32], core.public_key(), vec![3; 32], 1).unwrap();
+            core.set_group_chat_read_only(7, true).unwrap();
+        });
+        h.state_mut().state.open_chat.as_mut().unwrap().counts = (40, 3);
+        h.run();
+        assert!(h.query_by_label("Канал удалён").is_some(), "owner: deleted");
+        assert!(h.query_by_label("40 подписчиков, 3 в сети").is_none());
+        // (b) A subscriber (read-only by design) who got the mediator's «chat deleted» row.
+        let mut h = group_chat(1, |core| {
+            core.set_group_chat_read_only(7, true).unwrap();
+            let mut body = vec![0x05];
+            body.extend([2; 32]);
+            body.extend([0; 32]);
+            system(core, 1, now_ms() - 1000, body);
+        });
+        h.state_mut().state.open_chat.as_mut().unwrap().counts = (40, 3);
+        h.run();
+        assert!(h.query_by_label("Канал удалён").is_some(), "subscriber: deleted");
+        assert!(h.query_by_label("40 подписчиков, 3 в сети").is_none());
     }
 
     #[test] fn forward_dialog_lists_writable_groups_only() {
