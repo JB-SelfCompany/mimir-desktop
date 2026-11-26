@@ -70,15 +70,17 @@ pub fn encode_voice(bin: &Path, pcm: &[f32], rate: u32, channels: u16, bitrate: 
     run().inspect_err(|_| drop(std::fs::remove_file(out)))
 }
 
+fn poster_args(video: &Path, out_jpg: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["-hide_banner", "-y", "-i"].map(OsString::from).into();
+    args.push(video.into());
+    args.extend(["-frames:v", "1", "-q:v", "4"].map(OsString::from));
+    args.push(out_jpg.into());
+    args
+}
+
 /// The first frame of \`video\` as \`out_jpg\`, and the clip's duration in ms when ffmpeg reports one.
 pub fn video_poster(bin: &Path, video: &Path, out_jpg: &Path) -> Result<Option<u64>, String> {
-    let output = command(bin)
-        .args(["-hide_banner", "-y", "-i"])
-        .arg(video)
-        .args(["-frames:v", "1", "-q:v", "4"])
-        .arg(out_jpg)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = command(bin).args(poster_args(video, out_jpg)).output().map_err(|e| e.to_string())?;
     if !output.status.success() || !out_jpg.is_file() {
         let _ = std::fs::remove_file(out_jpg);
         return Err(failure(&output));
@@ -301,6 +303,111 @@ pub(crate) mod tests {
         assert_eq!(wait(&mut none, None), Poster::Failed, "no ffmpeg, no cache: the neutral tile");
     }
 
+    /// Every format, codec, filter and protocol our command lines name, or imply by an output's extension, is in an
+    /// --enable list of the Windows build (packaging/windows/ffmpeg.sh), with the filters ffmpeg puts in every graph.
+    #[test]
+    fn windows_build_enables_what_we_run() {
+        use crate::media::{call_audio, camera::{capture_args, Source}};
+        let script = include_str!("../../packaging/windows/ffmpeg.sh");
+        let enabled = |kind: &str, name: &str| {
+            let flag = format!("--enable-{kind}=");
+            script.lines().filter_map(|l| l.trim().strip_prefix(flag.as_str())).any(|l| l.trim_end_matches([' ', '\\']).split(',').any(|n| n == name))
+        };
+        let strings = |a: Vec<OsString>| a.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let (cam, take) = (Source::Dshow { camera: "c".into(), mic: Some("m".into()) }, Path::new("t.mp4"));
+        let lines = [
+            strings(voice_args(48000, 2, 32000, Path::new("v.m4a"))),
+            strings(poster_args(Path::new("v.mp4"), Path::new("p.jpg"))),
+            strings(capture_args(&cam, "h264_mf", take, true)),
+            strings(capture_args(&Source::Test, "h264_mf", take, false)),
+            call_audio::encoder_args(48000, 1),
+            call_audio::decoder_args(),
+        ];
+        // Inserted by ffmpeg itself: pixel and sample format conversion, -ar, -t.
+        let mut want: Vec<(&str, String)> = ["format", "aformat", "scale", "aresample", "trim", "atrim"]
+            .map(|f| ("filter", f.to_string()))
+            .into();
+        for a in &lines {
+            let mut format = "";
+            for (i, arg) in a.iter().enumerate() {
+                let prev = if i > 0 { a[i - 1].as_str() } else { "" };
+                // Inputs come before outputs: a -f with an -i after it is an input's.
+                let input = a[i..].iter().any(|x| x == "-i");
+                match prev {
+                    "-f" if input => {
+                        format = arg;
+                        want.push(if ["dshow", "lavfi"].contains(&format) { ("indev", arg.clone()) } else { ("demuxer", configure_name(arg)) });
+                    }
+                    "-f" => want.push(("muxer", configure_name(arg))),
+                    "-c:a" | "-c:v" => want.push(("encoder", arg.clone())),
+                    "-filter_complex" => want.extend(filters(arg).map(|f| ("filter", f))),
+                    "-i" => {
+                        match format {
+                            "lavfi" => want.extend(filters(arg).map(|f| ("filter", f))),
+                            "dshow" => {}
+                            _ => want.push(("protocol", if arg.starts_with("pipe:") { "pipe" } else { "file" }.into())),
+                        }
+                        format = "";
+                    }
+                    // An output path follows a value, never a bare flag (none of our lines has `-shortest out`).
+                    _ if !arg.starts_with('-') && !prev.starts_with('-') => {
+                        let muxer = match Path::new(arg).extension().and_then(|e| e.to_str()) {
+                            Some("m4a") => "ipod",
+                            Some("mp4") => "mp4",
+                            Some("jpg") => "image2",
+                            _ => "",
+                        };
+                        if !muxer.is_empty() {
+                            want.push(("muxer", muxer.into()));
+                        }
+                        want.push(("protocol", if arg.starts_with("pipe:") { "pipe" } else { "file" }.into()));
+                    }
+                    _ => {}
+                }
+                if prev == "-f" {
+                    // Raw formats name their codec: decoded on input, encoded (by default) on output.
+                    let codec = match arg.as_str() { "f32le" => "pcm_f32le", "aac" => "aac", "rawvideo" => "rawvideo", _ => "" };
+                    if !codec.is_empty() {
+                        want.push((if input { "decoder" } else { "encoder" }, codec.into()));
+                    }
+                }
+            }
+            if a.iter().any(|x| x.ends_with(".jpg")) {
+                want.push(("encoder", "mjpeg".into()));
+            }
+            if a.iter().any(|x| x == "lavfi") {
+                want.push(("decoder", "wrapped_avframe".into()));
+            }
+            if a.iter().any(|x| x == "dshow") {
+                // What webcams and microphones deliver.
+                want.extend(["rawvideo", "mjpeg", "pcm_s16le"].map(|d| ("decoder", d.to_string())));
+            }
+        }
+        let missing: Vec<_> = want.iter().filter(|(kind, name)| !enabled(kind, name)).collect();
+        assert!(missing.is_empty(), "not in packaging/windows/ffmpeg.sh: {missing:?}");
+    }
+
+    /// A format's name in configure's lists: the raw PCM formats are pcm_<name> there.
+    fn configure_name(format: &str) -> String {
+        if format == "f32le" { format!("pcm_{format}") } else { format.into() }
+    }
+
+    /// The filter names in a filtergraph (labels and options dropped; commas inside quotes are options).
+    fn filters(graph: &str) -> impl Iterator<Item = String> + '_ {
+        let mut quoted = false;
+        graph
+            .split(move |c| {
+                quoted ^= c == '\'';
+                !quoted && (c == ',' || c == ';')
+            })
+            .map(|mut f| {
+                while let Some(rest) = f.strip_prefix('[').and_then(|r| r.split_once(']')).map(|(_, r)| r) {
+                    f = rest;
+                }
+                f.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect()
+            })
+    }
+
     /// The real ffmpeg on this machine: encodes a tone and makes a poster from a generated clip.
     #[test]
     #[ignore = "needs ffmpeg"]
@@ -312,7 +419,7 @@ pub(crate) mod tests {
         encode_voice(&bin, &pcm, 48000, 1, 32000, &out).unwrap();
         assert!(std::fs::metadata(&out).unwrap().len() > 1000);
         let clip = tmp.path().join("c.mp4");
-        let st = command(&bin).args(["-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=10"]).arg(&clip).status().unwrap();
+        let st = command(&bin).args(["-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=10", "-c:v", "mjpeg"]).arg(&clip).status().unwrap();
         assert!(st.success());
         let poster = tmp.path().join("p.jpg");
         let ms = video_poster(&bin, &clip, &poster).unwrap().unwrap();

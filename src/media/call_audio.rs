@@ -466,7 +466,7 @@ fn playout(shared: Arc<Shared>) {
 // ---------------------------------------------------------------------------------------------------- ffmpeg
 
 /// Raw f32 PCM as captured in, Android's AAC as an ADTS stream out, one packet at a time.
-fn encoder_args(rate: u32, channels: u16) -> Vec<String> {
+pub(super) fn encoder_args(rate: u32, channels: u16) -> Vec<String> {
     let (rate, channels, bitrate, out_rate) = (rate.to_string(), channels.to_string(), BITRATE.to_string(), SAMPLE_RATE.to_string());
     // No probing (it holds ~5 s of input back before the first frame); no -fflags nobuffer: with it ffmpeg 8 drops all
     // raw input ("Output file is empty").
@@ -478,7 +478,7 @@ fn encoder_args(rate: u32, channels: u16) -> Vec<String> {
 }
 
 /// ADTS in (no probing: the format is known), f32 44.1 kHz mono out as soon as each frame is decoded.
-fn decoder_args() -> Vec<String> {
+pub(super) fn decoder_args() -> Vec<String> {
     let rate = SAMPLE_RATE.to_string();
     ["-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-probesize", "32", "-analyzeduration", "0", "-f", "aac", "-i", "pipe:0"]
         .into_iter()

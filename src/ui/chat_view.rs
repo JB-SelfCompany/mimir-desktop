@@ -34,6 +34,8 @@ use time::{Date, OffsetDateTime, UtcOffset};
 
 const SEP_H: f32 = 26.;
 const CHIP_H: f32 = 20.;
+/// The delivery mark right of an outgoing message's time (status_image, 13 dp).
+const MARK: f32 = 13.;
 /// Group sender avatar beside an incoming bubble (message_incoming_layout, 48/6).
 const SENDER_AV: f32 = 48.;
 
@@ -268,9 +270,17 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     });
     let quote_h = quote.as_ref().map_or(0., |(_, g)| g.size().y + 4.);
     let quote_w = quote.as_ref().map_or(0., |(_, g)| g.size().x + 6.);
-    // A call record has no delivery tick (Android hides it).
-    let footer = format!("{}{}", hhmm(m.send_time), if out && m.delivered && !is_call { " ✔" } else { "" });
-    let footer_g = ui.painter().layout_no_wrap(footer, FontId::proportional(11.), p.text_dim);
+    // message_outgoing_layout: the 11 sp time, then a 13 dp status_image 4 dp to its right, in iconColor
+    // (ic_message_delivered once delivered, ic_message_not_sent before). A call record has none (Android hides it).
+    let footer_g = ui.painter().layout_no_wrap(hhmm(m.send_time), FontId::proportional(11.), p.text_dim);
+    let mark = (out && !is_call).then(|| {
+        if m.delivered {
+            egui::include_image!("../../assets/icons/checkbox-marked-circle-outline.svg")
+        } else {
+            egui::include_image!("../../assets/icons/circle-outline.svg")
+        }
+    });
+    let footer_w = footer_g.size().x + if mark.is_some() { MARK + 4. } else { 0. };
 
     let chip_list = cx.reactions.entry(m.guid).or_insert_with(|| chips(cx.core, cx.key, m.guid)).clone();
     let chip_gs: Vec<_> = chip_list
@@ -284,7 +294,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     let name_w = sender.as_ref().map_or(0., |g| g.size().x);
     let (att_w, att_h) = att.as_ref().map_or((0., 0.), |a| (a.size.x, a.size.y + 4.));
     let text_h = if text.is_empty() { 0. } else { galley.size().y };
-    let content_w = galley.size().x.max(footer_g.size().x).max(chips_w.min(wrap)).max(quote_w).max(name_w).max(att_w);
+    let content_w = galley.size().x.max(footer_w).max(chips_w.min(wrap)).max(quote_w).max(name_w).max(att_w);
     // ponytail: chips share one line; a message with very many reactions overflows the bubble.
     let chips_h = if chip_gs.is_empty() { 0. } else { CHIP_H + 4. };
     let content_size = vec2(content_w, name_h + quote_h + att_h + text_h + 2. + footer_g.size().y + chips_h);
@@ -347,7 +357,12 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     if !text.is_empty() {
         painter.galley(text_min, galley.clone(), p.text);
     }
-    painter.galley(pos2(content.right() - footer_g.size().x, text_min.y + text_h + 2.), footer_g, p.text_dim);
+    let footer_min = pos2(content.right() - footer_w, text_min.y + text_h + 2.);
+    if let Some(mark) = mark {
+        let c = pos2(content.right() - MARK / 2., footer_min.y + footer_g.size().y / 2.);
+        egui::Image::new(mark).tint(p.text).paint_at(ui, Rect::from_center_size(c, Vec2::splat(MARK)));
+    }
+    ui.painter().galley(footer_min, footer_g, p.text_dim);
 
     // Interaction: the body is one widget labelled with the text; chips come after so they sit on top.
     let body = ui.interact(g.body, ui.scope_id().with(("msg", m.id)), Sense::click());
@@ -399,22 +414,23 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     // Hover mini-toolbar at the top corner of the bubble.
     let tb = Rect::from_min_size(pos2(if out { g.body.left() - 84. } else { g.body.right() + 4. }, g.body.top() - 2.), vec2(80., 24.));
     if ui.rect_contains_pointer(g.body.union(tb)) {
-        ui.scope_builder(UiBuilder::new().max_rect(tb).layout(Layout::left_to_right(Align::Center)), |ui| {
-            Frame::popup(ui.style()).inner_margin(2).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 0.;
-                let btn = |ui: &mut Ui, s: &str| ui.add(Button::new(s).frame(false).min_size(vec2(24., 18.)));
-                let smile = btn(ui, "😊");
-                if smile.clicked() {
-                    *cx.menu = Some(Menu { msg: mref.clone(), pos: smile.rect.left_bottom(), expanded: false });
-                }
-                if btn(ui, "↩").clicked() {
-                    cx.actions.push((Action::Reply(m.guid), mref.clone()));
-                }
-                let more = btn(ui, "…");
-                if more.clicked() {
-                    *cx.menu = Some(Menu { msg: mref.clone(), pos: more.rect.left_bottom(), expanded: false });
-                }
-            });
+        // A child ui, not a scope: a scope advances the list's cursor to the toolbar's bottom, so the rows after a
+        // hovered one jumped up over it (and under the pointer, which flickered between them).
+        let ui = &mut ui.new_child(UiBuilder::new().max_rect(tb).layout(Layout::left_to_right(Align::Center)));
+        Frame::popup(ui.style()).inner_margin(2).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.;
+            let btn = |ui: &mut Ui, s: &str| ui.add(Button::new(s).frame(false).min_size(vec2(24., 18.)));
+            let smile = btn(ui, "😊");
+            if smile.clicked() {
+                *cx.menu = Some(Menu { msg: mref.clone(), pos: smile.rect.left_bottom(), expanded: false });
+            }
+            if btn(ui, "↩").clicked() {
+                cx.actions.push((Action::Reply(m.guid), mref.clone()));
+            }
+            let more = btn(ui, "…");
+            if more.clicked() {
+                *cx.menu = Some(Menu { msg: mref.clone(), pos: more.rect.left_bottom(), expanded: false });
+            }
         });
     }
     row_resp
@@ -1107,6 +1123,40 @@ mod tests {
         let title = h.get_by_role_and_label(Role::Label, "Избранное").rect();
         assert!((title.center().y - 22.).abs() < 2., "title centre {}", title.center().y);
     }
+
+    /// (texture name, tint) of the 13 px status marks painted inside the bubble labelled `text`.
+    fn marks_in(h: &Harness<'static, MimirDesktop>, text: &str) -> Vec<(String, Color32)> {
+        let body = chat_label(h, text).expect(text);
+        let tex = h.ctx.tex_manager();
+        let tex = tex.read();
+        h.output().shapes.iter().filter_map(|cs| match &cs.shape {
+            Shape::Rect(r) if r.rect.size() == vec2(13., 13.) && body.contains_rect(r.rect) => {
+                Some((tex.meta(r.fill_texture_id()).map_or(String::new(), |m| m.name.clone()), r.fill))
+            }
+            _ => None,
+        }).collect()
+    }
+
+    #[test] fn delivery_marks_follow_android() {
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        let core = h.state().core.clone();
+        let t = now_ms() - 1000;
+        for (guid, incoming, delivered, text) in [(1, false, true, "дошло"), (2, false, false, "в пути"), (3, true, true, "входящее")] {
+            core.add_local_message(SAVED_ID, guid, 0, incoming, delivered, t + guid, 0, 0, text.as_bytes().to_vec()).unwrap();
+        }
+        h.state_mut().state.selected = Some(ChatKey::SAVED);
+        h.run();
+        h.run();
+        let text = palette(h.ctx.global_style().visuals.dark_mode).text;
+        // MessageAdapter: ic_message_delivered (a ticked circle) once delivered, ic_message_not_sent (an empty circle) before.
+        let one = |text: &str| { let m = marks_in(&h, text); assert_eq!(m.len(), 1, "{text}: {m:?}"); m[0].clone() };
+        let (delivered, tint) = one("дошло");
+        assert!(delivered.ends_with("checkbox-marked-circle-outline.svg") && tint == text, "{delivered} {tint:?}");
+        let (pending, tint) = one("в пути");
+        assert!(pending.ends_with("/circle-outline.svg") && tint == text, "{pending} {tint:?}");
+        assert!(marks_in(&h, "входящее").is_empty(), "no mark on an incoming message");
+    }
+
     #[test] fn day_labels() {
         let now = ts(2026, 11, 20, 12);
         assert_eq!(day_label(now, now, Lang::Ru), "Сегодня");
@@ -1127,6 +1177,51 @@ mod tests {
         h.get_by_label("hello").hover();
         h.run();
         assert!(h.query_by_label("↩").is_some());
+    }
+    /// Hovers each row showing one of `texts` and asserts that none of them moves: the toolbar is an overlay.
+    fn assert_hover_keeps_rows(h: &mut Harness<'static, MimirDesktop>, texts: &[String]) {
+        let rects = |h: &Harness<'static, MimirDesktop>| texts.iter().map(|t| chat_label(h, t)).collect::<Vec<_>>();
+        h.hover_at(pos2(5., 5.));
+        h.run();
+        let still = rects(h);
+        // Rows the composer covers cannot be hovered.
+        let composer = h.get_by_role(Role::MultilineTextInput).rect().top() - 16.;
+        let mut hovered = 0;
+        for (text, r) in texts.iter().zip(&still) {
+            let Some(r) = r.filter(|r| r.bottom() < composer) else { continue };
+            h.hover_at(r.center());
+            h.run();
+            assert_eq!(rects(h), still, "hovering {text} moved rows");
+            assert_eq!(h.query_all_by_label("↩").count(), 1, "{text}: one toolbar shown");
+            hovered += 1;
+        }
+        assert!(hovered >= 4, "only {hovered} rows hovered");
+    }
+    #[test] fn hover_never_moves_group_rows() {
+        // A public group: many senders, each incoming row with a name and an avatar.
+        let t = now_ms() - 100_000;
+        let texts: Vec<String> = (1..=12u8).map(|i| format!("сообщение {i}")).collect();
+        let mut h = group_chat(0, |core| {
+            for (i, text) in texts.iter().enumerate() {
+                let k = vec![i as u8 + 10; 32];
+                core.update_member_info(7, k.clone(), Some(format!("Участник {i}")), None, None).unwrap();
+                core.add_group_message(7, i as i64 + 1, i as i64 + 11, k, t + i as i64, 0, false, text.as_bytes().to_vec(), 0, false).unwrap();
+            }
+        });
+        assert_hover_keeps_rows(&mut h, &texts);
+    }
+    #[test] fn hover_never_moves_contact_rows() {
+        let texts: Vec<String> = (1..=12u8).map(|i| format!("сообщение {i}")).collect();
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        let core = h.state().core.clone();
+        let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
+        for (i, text) in texts.iter().enumerate() {
+            core.add_local_message(c, i as i64 + 1, 0, i % 2 == 0, true, now_ms() - 100_000 + i as i64, 0, 0, text.as_bytes().to_vec()).unwrap();
+        }
+        h.state_mut().state.chats = crate::model::chat_list::build_chat_list(&core, Lang::Ru);
+        h.state_mut().state.selected = Some(ChatKey::Contact(c));
+        h.run();
+        assert_hover_keeps_rows(&mut h, &texts);
     }
     #[test] fn reaction_chip_with_zwj_emoji_renders() {
         let mut h = chat_with(&["hello"]);

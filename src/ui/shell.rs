@@ -90,6 +90,8 @@ fn toolbar(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
             if profile.clicked() {
                 app.state.show_profile = true;
             }
+            // Android's toolbar title starts at contentInsetStartWithNavigation (72dp) from the edge; the frame adds 8.
+            ui.add_space((ui.max_rect().left() + 64. - ui.cursor().left() - ui.spacing().item_spacing.x).max(0.));
             ui.label(RichText::new("Mimir").size(16.).color(Color32::WHITE));
             let n = &app.state.net;
             ui.add_space(6.);
@@ -304,6 +306,21 @@ mod tests {
         h.run_steps(2);
         run_until(&mut h, "the staging", |h| h.state().state.settings_ui.restarting);
         assert!(pending.is_file());
+    }
+
+    #[test]
+    fn title_sits_at_android_keyline() {
+        let mut h = test_harness(Settings::default());
+        h.get_by_label("Начать").click();
+        h.run();
+        let profile = h.get_by_label(crate::i18n::tr(crate::i18n::Lang::Ru, crate::i18n::Key::Profile)).rect();
+        let title = h.get_by_label("Mimir").rect();
+        assert_eq!(title.left() - (profile.left() - 8.), 72., "toolbar title starts 72 from the toolbar's left edge");
+        // The narrowest list (260) still fits title, three 8px dots and the right-hand buttons.
+        h.set_size(eframe::egui::vec2(700., 600.));
+        h.run_steps(2);
+        let add = h.get_by_label(crate::i18n::tr(crate::i18n::Lang::Ru, crate::i18n::Key::AddContact)).rect();
+        assert!(add.left() >= h.get_by_label("Mimir").rect().right() + 6. + 32., "dots end {} past the add button {}", h.get_by_label("Mimir").rect().right() + 38., add.left());
     }
 
     #[test]

@@ -8,14 +8,35 @@ permissions:
   contents: write
 env:
   CARGO_TERM_COLOR: always
-  # LGPL static ffmpeg for Windows (BtbN month-end autobuilds are kept); its LICENSE.txt ships as FFMPEG-LICENSE.txt.
-  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-9.0.zip
-  FFMPEG_SHA256: 9d37c564e0d01c18cde184a079fa6ef04d7d2783ada41da81d04165cc8f1a650
   # Inno Setup 6 (signed by its author), installed portable into the runner's temp dir: no preinstalled version assumed.
   INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe
   INNO_SHA256: a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
 jobs:
+  ffmpeg:
+    # The Windows packages' minimal LGPL ffmpeg.exe (packaging/windows/ffmpeg.sh pins the source and the configure
+    # line), cross-compiled with mingw-w64; rebuilt only when that script changes. A tag run can restore only its own
+    # caches and the default branch's: a manual run on main after changing the script primes it for every tag.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: ffmpeg-win64
+          key: ffmpeg-win64-${{ hashFiles('packaging/windows/ffmpeg.sh') }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq mingw-w64 libz-mingw-w64-dev nasm
+          bash packaging/windows/ffmpeg.sh ffmpeg-win64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-win64
+          path: ffmpeg-win64/*
+          if-no-files-found: error
+
   build:
+    needs: ffmpeg
     strategy:
       matrix:
         os: [ubuntu-24.04, windows-latest]
@@ -38,6 +59,11 @@ jobs:
       - name: System libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libasound2-dev libxkbcommon-dev libxdo-dev libayatana-appindicator3-dev pkg-config
+      - uses: actions/download-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: ffmpeg-win64
+          path: mimir-desktop/ffmpeg-win64
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -55,11 +81,7 @@ jobs:
           cp LICENSE README.md dist/$name/
           if [ "${{ runner.os }}" = Windows ]; then
             cp target/release/mimir-desktop.exe dist/$name/
-            curl -fsSL -o ffmpeg.zip "$FFMPEG_URL"
-            echo "$FFMPEG_SHA256  ffmpeg.zip" | sha256sum -c -
-            7z x ffmpeg.zip -offmpeg >/dev/null
-            cp ffmpeg/*/bin/ffmpeg.exe dist/$name/
-            cp ffmpeg/*/LICENSE.txt dist/$name/FFMPEG-LICENSE.txt
+            cp ffmpeg-win64/ffmpeg.exe ffmpeg-win64/FFMPEG-LICENSE.txt dist/$name/
             (cd dist && 7z a -tzip -mx=9 ../out/$name.zip $name >/dev/null)
             version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             inno=$(cygpath -u "$RUNNER_TEMP")/inno
@@ -86,6 +108,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: out
+          pattern: "{Linux,Windows}"
           merge-multiple: true
       - name: SHA256SUMS
         working-directory: out
