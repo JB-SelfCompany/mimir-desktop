@@ -29,7 +29,7 @@ UninstallDisplayIcon={app}\mimir.ico
 UninstallDisplayName=Mimir
 OutputDir=.
 OutputBaseFilename=mimir-desktop-{#Tag}-windows-x86_64-setup
-Compression=lzma2
+Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 

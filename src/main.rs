@@ -1,3 +1,6 @@
+// No console window behind the app on Windows (release builds; debug keeps it for logs).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use eframe::egui::ViewportBuilder;
 use mimir_desktop::{app::Startup, logs, paths::DataPaths, platform};
 
@@ -24,7 +27,8 @@ fn main() -> eframe::Result {
                 .with_title("Mimir")
                 .with_inner_size([1100., 720.])
                 .with_min_inner_size([720., 480.])
-                .with_drag_and_drop(true),
+                .with_drag_and_drop(true)
+                .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app.png")).expect("bundled app icon")),
             ..Default::default()
         },
         Box::new(move |cc| Ok(Box::new(Startup::new(cc, instance, link)))),

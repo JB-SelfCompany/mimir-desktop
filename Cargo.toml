@@ -72,5 +72,14 @@ assets = [
 ]
 
 # ygg_stream is a cdylib; at opt-level 0 share-generics exports >65535 symbols and gnu ld fails ("export ordinal too large").
+[profile.release]
+# Smallest exe: whole-program optimisation, one codegen unit, no debug symbols.
+lto = true
+codegen-units = 1
+strip = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [profile.dev.package.ygg_stream]
 opt-level = 2

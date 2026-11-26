@@ -70,7 +70,7 @@ jobs:
             7z x ffmpeg.zip -offmpeg >/dev/null
             cp ffmpeg/*/bin/ffmpeg.exe dist/$name/
             cp ffmpeg/*/LICENSE.txt dist/$name/FFMPEG-LICENSE.txt
-            (cd dist && 7z a -tzip ../out/$name.zip $name >/dev/null)
+            (cd dist && 7z a -tzip -mx=9 ../out/$name.zip $name >/dev/null)
             version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             inno=$(cygpath -u "$RUNNER_TEMP")/inno
             curl -fsSL -o inno.exe "$INNO_URL"
@@ -79,7 +79,7 @@ jobs:
             MSYS_NO_PATHCONV=1 "$inno/ISCC.exe" /Q "/DVersion=$version" "/DTag=$tag" "/DSourceDir=$(cygpath -w "$PWD/dist/$name")" "/O$(cygpath -w "$PWD/out")" packaging/windows/mimir.iss
           else
             cp target/release/mimir-desktop dist/$name/
-            tar -C dist -czf out/$name.tar.gz $name
+            tar -C dist -cf - $name | gzip -9 > out/$name.tar.gz
             cargo install cargo-deb@3.8.0 --locked
             cargo deb --no-build --locked --output out/
           fi
