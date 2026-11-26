@@ -26,6 +26,8 @@ jobs:
             set -- $p
             git init -q upstream/$1 && git -C upstream/$1 fetch -q --depth 1 $2 $3 && git -C upstream/$1 checkout -q FETCH_HEAD
           done
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: System libraries
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libasound2-dev libxkbcommon-dev libxdo-dev libayatana-appindicator3-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
