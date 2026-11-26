@@ -27,6 +27,8 @@ pub struct MimirDesktop {
     pub lang: Lang,
     /// Voice and audio playback (its own thread).
     pub player: crate::media::player::Player,
+    /// Call audio (its own threads); the core's Bridge feeds it the received frames.
+    pub call_audio: crate::media::call_audio::CallAudio,
     /// What the window shows, for the notifications the core's callback thread decides (`core::events::Bridge`).
     pub focus: Arc<Mutex<Focus>>,
     /// Test data dir, dropped (deleted) with the app.
@@ -183,14 +185,15 @@ impl MimirDesktop {
         let ffmpeg = if cfg!(test) { None } else { crate::media::ffmpeg::locate() };
         let state = AppState { chats: build_chat_list(&core, lang), ffmpeg, ..Default::default() };
         let player = crate::media::player::Player::spawn(ctx.clone(), worker.clone(), lang);
-        let focus = Arc::new(Mutex::new(Focus { chat: None, focused: false, lang }));
-        let mut app = MimirDesktop { core, worker, group_worker, rx, events: tx.clone(), state, settings, paths, lang, player, focus, #[cfg(test)] test_tmp: None };
+        let focus = Arc::new(Mutex::new(Focus { chat: None, focused: false, lang, in_call: false }));
+        let call_audio = crate::media::call_audio::CallAudio::new(core.clone(), state.ffmpeg.clone(), tx.clone(), ctx.clone());
+        let mut app = MimirDesktop { core, worker, group_worker, rx, events: tx.clone(), state, settings, paths, lang, player, call_audio, focus, #[cfg(test)] test_tmp: None };
         app.refresh_requests();
         invites::refresh(&mut app);
         if let Some(cfg) = net_cfg {
             let (events, wake, focus) = (tx.clone(), ctx.clone(), app.focus.clone());
-            let show = move |title, body| notify::show(title, body, focus.lock().unwrap_or_else(|p| p.into_inner()).lang, events.clone(), wake.clone());
-            let bridge = Bridge::new(tx, ctx.clone()).notifying(&app.core, app.focus.clone(), show);
+            let show = move |title, body, alert| notify::show(title, body, alert, focus.lock().unwrap_or_else(|p| p.into_inner()).lang, events.clone(), wake.clone());
+            let bridge = Bridge::new(tx, ctx.clone()).notifying(&app.core, app.focus.clone(), show).with_call_audio(app.call_audio.sink());
             net::start(&app.worker, cfg, bridge);
         }
         app
@@ -254,6 +257,7 @@ impl MimirDesktop {
                         self.state.thumbs.invalidate(&p);
                     }
                     self.refresh_last_seen(pubkey);
+                    crate::ui::call::on_event(self, ctx, &e);
                 }
                 Event::ContactDisconnected { pubkey, .. } => {
                     self.state.online.remove(pubkey);
@@ -492,7 +496,15 @@ impl MimirDesktop {
                         self.error_text(format!("{what}: {err}"));
                     }
                 }
-                Event::IncomingCall { pubkey } => self.state.incoming_call = Some((pubkey.clone(), Instant::now())),
+                Event::IncomingCall { .. }
+                | Event::CallStatusChanged { .. }
+                | Event::CallAudio(_)
+                | Event::GroupCallParticipants { .. }
+                | Event::GroupCallParticipantEvent { .. }
+                | Event::GroupCallError { .. }
+                | Event::GroupCallDisconnected => crate::ui::call::on_event(self, ctx, &e),
+                Event::WorkDone(WorkResult::GroupCallUp { token, link }) => crate::ui::call::group_up(self, *token, link),
+                Event::WorkDone(WorkResult::GroupCallFailed { token, err }) => crate::ui::call::group_failed(self, *token, err),
                 Event::DraftSynced { chat_type, chat_id } => {
                     // 0 = contact (or Saved Messages), 1 = group; anything else is not a chat we know.
                     let key = match chat_type {
@@ -685,7 +697,7 @@ impl eframe::App for MimirDesktop {
         }
         let chat = self.state.open_chat.as_ref().map(|c| c.key);
         let focused = self.window_focused(ctx);
-        *self.focus.lock().unwrap_or_else(|p| p.into_inner()) = Focus { chat, focused, lang: self.lang };
+        *self.focus.lock().unwrap_or_else(|p| p.into_inner()) = Focus { chat, focused, lang: self.lang, in_call: self.state.call.is_some() || self.state.group_call.is_some() };
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -693,6 +705,7 @@ impl eframe::App for MimirDesktop {
     }
 
     fn on_exit(&mut self) {
+        crate::ui::call::on_exit(self);
         crate::ui::composer::save_open_draft(self);
     }
 }

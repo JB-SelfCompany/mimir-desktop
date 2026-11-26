@@ -1,5 +1,6 @@
 //! Media helpers: thumbnails and the attachment file actions (open with the system app, save as).
 pub mod avatar;
+pub mod call_audio;
 pub mod ffmpeg;
 pub mod player;
 pub mod recorder;
@@ -8,6 +9,30 @@ pub mod thumbs;
 
 use crate::{core::worker::{WorkResult, Worker}, i18n::{tr, Key, Lang}};
 use std::{ffi::OsString, path::{Path, PathBuf}};
+
+/// cpal 0.15 (WASAPI) makes one device enumerator per process, in the COM apartment of the first thread that asks.
+/// When that thread ends, the enumerator goes with its apartment, and the next stream opened anywhere crashes the
+/// process (an access violation: a call's microphone and speaker threads start together, and a failed microphone
+/// thread ends at once). So the first ask is made here, on a thread kept for the life of the process: every place
+/// that opens audio calls this first.
+// ponytail: one parked thread for good; nothing to do off Windows, where the same call is harmless.
+pub fn pin_audio_enumerator() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("audio-devices".into()).spawn(move || {
+            use cpal::traits::HostTrait as _;
+            let _ = cpal::default_host().default_output_device();
+            let _ = tx.send(());
+            loop {
+                std::thread::park();
+            }
+        });
+        if spawned.is_ok() {
+            let _ = rx.recv();
+        }
+    });
+}
 
 /// Deletes cleared attachments: each stored name is reduced to a bare file name inside `files_dir` (a stored name must
 /// not reach outside it), along with its video poster in `.thumbs`.
@@ -117,6 +142,22 @@ fn copy_to(src: &Path, dest: &Path, lang: Lang) -> WorkResult {
     match std::fs::copy(src, dest) {
         Ok(_) => WorkResult::Notice(Key::FileSaved),
         Err(e) => WorkResult::Failed { what: tr(lang, Key::CannotSaveFile), err: e.to_string() },
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    /// A microphone thread that ends (at once, without a microphone) while a speaker opens on another thread must
+    /// not take the device enumerator with it.
+    #[test]
+    fn audio_survives_a_finished_audio_thread() {
+        super::pin_audio_enumerator();
+        let mic = std::thread::spawn(|| drop(crate::media::recorder::open_input(|_| {})));
+        let out = std::thread::spawn(|| drop(rodio::OutputStream::try_default()));
+        mic.join().unwrap();
+        out.join().unwrap();
+        let again = std::thread::spawn(|| drop(rodio::OutputStream::try_default()));
+        again.join().unwrap();
     }
 }
 

@@ -232,6 +232,8 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui) {
     settings::show(app, &ctx);
     // After settings: «Медиаторы» in its Advanced section opens this over it (the last modal shown is on top).
     mediators::show(app, &ctx);
+    // Last: an incoming call's dialog comes up over any other.
+    crate::ui::call::show(app, &ctx);
 }
 
 #[cfg(test)]

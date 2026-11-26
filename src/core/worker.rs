@@ -21,6 +21,11 @@ pub enum WorkResult {
     RequestAccepted { contact_id: i64 },
     RequestDeclined,
     Started,
+    /// `create_group_call` / `join_group_call` succeeded: we are in the session `link` invites to (`mimir://gc/…`).
+    /// `token`: the attempt (`call::GroupCall`) it answers.
+    GroupCallUp { token: u64, link: String },
+    /// `create_group_call` / `join_group_call` failed.
+    GroupCallFailed { token: u64, err: String },
     /// A job with nothing to report (dials, reaction sends).
     Done,
     /// A job that succeeded with something to tell the user (status line, accent colour).

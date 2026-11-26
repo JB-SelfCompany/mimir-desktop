@@ -1,11 +1,11 @@
 use eframe::egui;
-use crate::platform::notify::{decide, new_ring, Focus};
+use crate::platform::notify::{alert, decide, new_ring, Focus};
 use mimir::{AppEventListener, CallStatus, GroupCallParticipant, MimirApp};
 use std::sync::{mpsc::Sender, Arc, Mutex, Weak};
 
 use super::worker::WorkResult;
 
-/// One variant per `AppEventListener` callback (mimir 0.3.5), plus the worker's results.
+/// One variant per `AppEventListener` callback (mimir 0.3.5) but the audio frames, plus the worker's results.
 #[derive(Debug)]
 pub enum Event {
     ConnectivityChanged { is_online: bool },
@@ -30,11 +30,9 @@ pub enum Event {
     MediatorDisconnected { mediator_pubkey: Vec<u8> },
     IncomingCall { pubkey: Vec<u8> },
     CallStatusChanged { status: CallStatus, pubkey: Option<Vec<u8>> },
-    CallPacket { pubkey: Vec<u8>, data: Vec<u8> },
     GroupCallJoined { session_id: Vec<u8> },
     GroupCallParticipants { session_id: Vec<u8>, participants: Vec<GroupCallParticipant> },
     GroupCallParticipantEvent { session_id: Vec<u8>, event: u8, pubkey: Vec<u8>, display_name: String },
-    GroupCallAudio { session_id: Vec<u8>, from_pubkey: Vec<u8>, seq: u32, aac_frame: Vec<u8> },
     GroupCallError { code: u8, message: String },
     GroupCallDisconnected,
     FileProgress { guid: i64, bytes_done: i64, total_bytes: i64, is_upload: bool },
@@ -44,6 +42,8 @@ pub enum Event {
     ContactResponse { pubkey: Vec<u8>, accepted: bool },
     TrackerAnnounce { ok: bool, ttl: i32 },
     WorkDone(WorkResult),
+    /// Call audio failed (`media::call_audio`); its frames never come this way.
+    CallAudio(crate::media::call_audio::AudioError),
     /// Another launch forwarded a link or asked to be shown (`platform::relay`).
     External(crate::platform::Ext),
     /// The tray's Exit: leave for real (closing the window only hides it while the tray is up).
@@ -56,6 +56,8 @@ pub struct Bridge {
     tx: Sender<Event>,
     ctx: egui::Context,
     notify: Option<Notifier>,
+    /// Where call audio frames go, straight to the audio threads.
+    audio: Option<Arc<crate::media::call_audio::Sink>>,
 }
 
 struct Notifier {
@@ -63,18 +65,23 @@ struct Notifier {
     core: Weak<MimirApp>,
     focus: Arc<Mutex<Focus>>,
     /// `platform::notify::show` in the app; a recorder in tests (they never toast).
-    show: Box<dyn Fn(String, String) + Send + Sync>,
+    show: Box<dyn Fn(String, String, bool) + Send + Sync>,
     /// The last caller announced, and when (the core may report one call more than once).
     last_ring: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
 }
 
 impl Bridge {
     pub fn new(tx: Sender<Event>, ctx: egui::Context) -> Bridge {
-        Bridge { tx, ctx, notify: None }
+        Bridge { tx, ctx, notify: None, audio: None }
+    }
+
+    /// Hands call audio frames to `sink` (without it they are dropped).
+    pub fn with_call_audio(self, sink: Arc<crate::media::call_audio::Sink>) -> Bridge {
+        Bridge { audio: Some(sink), ..self }
     }
 
     /// Also decides notifications against `focus` (what the window shows) and hands them to `show`.
-    pub fn notifying(self, core: &Arc<MimirApp>, focus: Arc<Mutex<Focus>>, show: impl Fn(String, String) + Send + Sync + 'static) -> Bridge {
+    pub fn notifying(self, core: &Arc<MimirApp>, focus: Arc<Mutex<Focus>>, show: impl Fn(String, String, bool) + Send + Sync + 'static) -> Bridge {
         Bridge { notify: Some(Notifier { core: Arc::downgrade(core), focus, show: Box::new(show), last_ring: Mutex::new(None) }), ..self }
     }
 
@@ -86,7 +93,7 @@ impl Bridge {
                 _ => true,
             });
             if let Some((title, body)) = notice {
-                (n.show)(title, body);
+                (n.show)(title, body, alert(&e, &focus));
             }
         }
         // A closed receiver means shutdown; ignore.
@@ -163,7 +170,9 @@ impl AppEventListener for Bridge {
         self.send(Event::CallStatusChanged { status, pubkey });
     }
     fn on_call_packet(&self, pubkey: Vec<u8>, data: Vec<u8>) {
-        self.send(Event::CallPacket { pubkey, data });
+        if let Some(sink) = &self.audio {
+            sink.peer_frame(pubkey, data);
+        }
     }
     fn on_group_call_joined(&self, session_id: Vec<u8>) {
         self.send(Event::GroupCallJoined { session_id });
@@ -174,8 +183,11 @@ impl AppEventListener for Bridge {
     fn on_group_call_participant_event(&self, session_id: Vec<u8>, event: u8, pubkey: Vec<u8>, display_name: String) {
         self.send(Event::GroupCallParticipantEvent { session_id, event, pubkey, display_name });
     }
-    fn on_group_call_audio(&self, session_id: Vec<u8>, from_pubkey: Vec<u8>, seq: u32, aac_frame: Vec<u8>) {
-        self.send(Event::GroupCallAudio { session_id, from_pubkey, seq, aac_frame });
+    // One group call at a time (the core's too), so the session id is not checked; seq is not used (arrival order).
+    fn on_group_call_audio(&self, _session_id: Vec<u8>, from_pubkey: Vec<u8>, _seq: u32, aac_frame: Vec<u8>) {
+        if let Some(sink) = &self.audio {
+            sink.group_frame(from_pubkey, aac_frame);
+        }
     }
     fn on_group_call_error(&self, code: u8, message: String) {
         self.send(Event::GroupCallError { code, message });
@@ -221,11 +233,11 @@ mod tests {
         let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
         let id = core.add_local_message(c, 1, 0, true, false, 1000, 0, 0, "привет".as_bytes().to_vec()).unwrap();
         // The window is hidden: the app wrote focused = false and runs no frame.
-        let focus = Arc::new(Mutex::new(Focus { chat: Some(crate::model::chat_key::ChatKey::Contact(c)), focused: false, lang: crate::i18n::Lang::Ru }));
+        let focus = Arc::new(Mutex::new(Focus { chat: Some(crate::model::chat_key::ChatKey::Contact(c)), focused: false, lang: crate::i18n::Lang::Ru, in_call: false }));
         let shown = Arc::new(Mutex::new(vec![]));
         let rec = shown.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let b = Bridge::new(tx, egui::Context::default()).notifying(&core, focus, move |t, b| rec.lock().unwrap().push((t, b)));
+        let b = Bridge::new(tx, egui::Context::default()).notifying(&core, focus, move |t, b, _| rec.lock().unwrap().push((t, b)));
         b.on_message_received(c, id, 0, 0);
         b.on_contact_connected(vec![7; 32]);
         assert_eq!(*shown.lock().unwrap(), [("Аня".to_string(), "привет".to_string())]);

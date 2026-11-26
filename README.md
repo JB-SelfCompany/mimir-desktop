@@ -88,4 +88,4 @@ Run the tests with `cargo test`. Set `MIMIR_DATA_DIR` to keep a second profile a
 
 ## License
 
-[Mozilla Public License 2.0](LICENSE). The bundled Noto fonts are under the [SIL Open Font License](assets/fonts/OFL.txt).
+[Mozilla Public License 2.0](LICENSE). The bundled Noto fonts are under the [SIL Open Font License](assets/fonts/OFL.txt); the sounds come from Mimir for Android, under the [MIT License](assets/sounds/LICENSE.txt).

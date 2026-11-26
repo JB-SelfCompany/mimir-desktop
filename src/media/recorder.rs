@@ -107,7 +107,8 @@ fn checked(mut rec: Recording) -> Result<Recording, String> {
 
 /// The capture thread: records until told to stop or until the 60 s cap, which stops the capture and waits.
 fn capture(ctl: Receiver<Ctl>) -> Result<Recording, String> {
-    let (buf, rate, channels, stream) = open_input()?;
+    // ponytail: a stream error mid-take (device unplugged) is not reported; the take just ends where it stopped.
+    let (buf, rate, channels, stream) = open_input(|_| {})?;
     let first = ctl.recv_timeout(Duration::from_millis(MAX_MS));
     drop(stream);
     let finish = match first {
@@ -125,16 +126,18 @@ fn capture(ctl: Receiver<Ctl>) -> Result<Recording, String> {
 type Input = (Arc<Mutex<Vec<f32>>>, u32, u16, cpal::Stream);
 
 /// Opens the input stream, with I32 (some WASAPI/ALSA devices) and the conversion done by cpal's FromSample.
-fn open_input() -> Result<Input, String> {
+/// `on_error` hears what fails once it runs (the device unplugged).
+pub(crate) fn open_input(on_error: impl FnMut(cpal::StreamError) + Send + 'static) -> Result<Input, String> {
+    crate::media::pin_audio_enumerator();
     let device = cpal::default_host().default_input_device().ok_or(NO_MIC)?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let (rate, channels, config) = (supported.sample_rate().0, supported.channels(), supported.config());
     let buf = Arc::new(Mutex::new(Vec::new()));
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(&device, &config, &buf),
-        SampleFormat::I16 => build::<i16>(&device, &config, &buf),
-        SampleFormat::U16 => build::<u16>(&device, &config, &buf),
-        SampleFormat::I32 => build::<i32>(&device, &config, &buf),
+        SampleFormat::F32 => build::<f32>(&device, &config, &buf, on_error),
+        SampleFormat::I16 => build::<i16>(&device, &config, &buf, on_error),
+        SampleFormat::U16 => build::<u16>(&device, &config, &buf, on_error),
+        SampleFormat::I32 => build::<i32>(&device, &config, &buf, on_error),
         other => return Err(format!("Unsupported microphone sample format {other}")),
     }
     .map_err(|e| e.to_string())?;
@@ -142,13 +145,17 @@ fn open_input() -> Result<Input, String> {
     Ok((buf, rate, channels, stream))
 }
 
-fn build<T: SizedSample>(device: &cpal::Device, config: &cpal::StreamConfig, buf: &Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, cpal::BuildStreamError>
+fn build<T: SizedSample>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    buf: &Arc<Mutex<Vec<f32>>>,
+    on_error: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     f32: FromSample<T>,
 {
     let buf = buf.clone();
-    // ponytail: a stream error mid-take (device unplugged) is not reported; the take just ends where it stopped.
-    device.build_input_stream(config, move |data: &[T], _: &cpal::InputCallbackInfo| buf.lock().unwrap().extend(data.iter().map(|&s| f32::from_sample(s))), |_| {}, None)
+    device.build_input_stream(config, move |data: &[T], _: &cpal::InputCallbackInfo| buf.lock().unwrap().extend(data.iter().map(|&s| f32::from_sample(s))), on_error, None)
 }
 
 #[cfg(test)]

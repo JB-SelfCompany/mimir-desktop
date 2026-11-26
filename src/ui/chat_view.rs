@@ -19,7 +19,7 @@ use crate::{
         avatar::{self, avatar_color, avatar_seed_color, paint_saved},
         bubble::{geom, max_width},
         message_menu::{self, Action},
-        composer, info_panel,
+        call, composer, info_panel,
         theme::{danger_button, palette, Palette},
     },
 };
@@ -91,7 +91,7 @@ fn links(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     for word in text.split_inclusive(char::is_whitespace) {
         let w = word.trim_end();
         let w = w.trim_end_matches(['.', ',', ')', '!', '?', ';', ':']);
-        if w.starts_with("http://") || w.starts_with("https://") {
+        if w.starts_with("http://") || w.starts_with("https://") || w.starts_with("mimir://") {
             out.push((chars..chars + w.chars().count(), w.to_string()));
         }
         chars += word.chars().count();
@@ -178,9 +178,18 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     let meta = attachment_bubble::meta_of(&body_msg);
     let transfer = cx.transfers.get(&m.guid).copied().unwrap_or_default();
     let att = meta.map(|a| attachment_bubble::prepare(ui, m.guid, m.msg_type, a, cx.files, transfer, cx.thumbs, cx.posters, cx.ffmpeg, cx.player, lang, p, wrap));
+    let is_call = body_msg == MsgBody::Call;
+    let att = att.or_else(|| {
+        is_call.then(|| {
+            let (label, duration) = call::record_text(m.incoming, m.send_time, m.edit_time, lang);
+            attachment_bubble::call_record(ui, label, duration, p, wrap)
+        })
+    });
     // Save / Delete file: types 1, 3 and 4 only (BaseChatActivity), and only for a complete file.
     let file = att.as_ref().and_then(|a| a.file.clone()).filter(|_| matches!(m.msg_type, 1 | 3 | 4)).zip(meta.map(|a| a.display_name().to_string()));
     let forward = match (meta, &file) {
+        // A call record is not forwarded (Android: no menu entry for it).
+        (None, _) if is_call => None,
         (None, _) => Some(Forward::Text(text_of(m, lang).0)),
         // ponytail: forwarded as is, without stage_path's checks; a group's 500 MB cap is left to the core to refuse.
         (Some(a), Some((path, name))) => {
@@ -194,6 +203,7 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     let (text, italic) = match (&body_msg, meta) {
         (_, Some(a)) => (a.caption.clone(), false),
         (MsgBody::Text(t), None) => (t.clone(), false),
+        (MsgBody::Call, None) => (String::new(), false),
         (b, None) => (preview(b, lang), true),
     };
     let link_runs = links(&text);
@@ -258,7 +268,8 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     });
     let quote_h = quote.as_ref().map_or(0., |(_, g)| g.size().y + 4.);
     let quote_w = quote.as_ref().map_or(0., |(_, g)| g.size().x + 6.);
-    let footer = format!("{}{}", hhmm(m.send_time), if out && m.delivered { " ✔" } else { "" });
+    // A call record has no delivery tick (Android hides it).
+    let footer = format!("{}{}", hhmm(m.send_time), if out && m.delivered && !is_call { " ✔" } else { "" });
     let footer_g = ui.painter().layout_no_wrap(footer, FontId::proportional(11.), p.text_dim);
 
     let chip_list = cx.reactions.entry(m.guid).or_insert_with(|| chips(cx.core, cx.key, m.guid)).clone();
@@ -351,8 +362,10 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
     if body.clicked() {
         if let Some(pt) = body.interact_pointer_pos() {
             let idx = galley.cursor_from_pos(pt - text_min).index.0;
-            if let Some((_, url)) = link_runs.iter().find(|(r, _)| r.contains(&idx)) {
-                ui.ctx().open_url(OpenUrl::new_tab(url));
+            match link_runs.iter().find(|(r, _)| r.contains(&idx)) {
+                Some((_, url)) if url.starts_with("mimir://") => cx.actions.push((Action::Link(url.clone()), mref.clone())),
+                Some((_, url)) => ui.ctx().open_url(OpenUrl::new_tab(url)),
+                None => {}
             }
         }
     }
@@ -410,10 +423,11 @@ fn message_row(ui: &mut Ui, m: &StoredMessage, cx: &mut RowCx) -> egui::Response
 /// Height of the chat header (the narrow info overlay starts below it, so ⋮ stays reachable).
 pub const HEADER_H: f32 = 44.;
 
-/// Draws the header; returns whether the avatar/name was clicked (toggles the info panel) and the ⋮ button.
-fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Palette) -> (bool, Option<egui::Response>) {
+/// Draws the header; returns whether the avatar/name was clicked (toggles the info panel), the ⋮ button, and whether
+/// the call button (`call_btn` = enabled, name, hint) was clicked.
+fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Palette, call_btn: Option<(bool, &str, &str)>) -> (bool, Option<egui::Response>, bool) {
     let AppState { chats, online, open_chat, thumbs, .. } = state;
-    let Some(chat) = open_chat.as_ref() else { return (false, None) };
+    let Some(chat) = open_chat.as_ref() else { return (false, None, false) };
     let saved = chat.key == ChatKey::SAVED;
     let group = chat.key.is_group();
     let row = chats.iter().find(|r| r.key == chat.key);
@@ -421,7 +435,7 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
     let name = row.map_or("", |r| r.name.as_str());
     let is_channel = row.and_then(|r| r.group).is_some_and(|g| g.is_channel);
     let online = !group && online.contains(&chat.pubkey);
-    let (mut toggle, mut more) = (false, None);
+    let (mut toggle, mut more, mut calling) = (false, None, false);
     Frame::NONE.fill(p.toolbar).inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
         ui.set_height(HEADER_H);
         ui.set_width(ui.available_width());
@@ -482,31 +496,26 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
                     ui.painter().circle_filled(r.center() + vec2(0., dy), 1.8, Color32::WHITE);
                 }
                 more = Some(resp);
+                if let Some((enabled, label, hint)) = call_btn {
+                    ui.add_space(8.);
+                    let (r, resp) = ui.allocate_exact_size(vec2(28., 28.), if enabled { Sense::click() } else { Sense::hover() });
+                    resp.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, label));
+                    let color = if enabled { Color32::WHITE } else { Color32::from_white_alpha(90) };
+                    call::phone_icon(ui, r.center(), 20., color, false);
+                    let resp = resp.on_hover_text(hint);
+                    calling = enabled && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                }
             });
         });
     });
-    (toggle, more)
-}
-
-/// How long the incoming-call banner stays after the contact rang.
-const CALL_BANNER: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// A row under the header while this chat's contact rang less than a minute ago: the desktop does not take calls.
-fn call_banner(ui: &mut Ui, state: &AppState, lang: Lang, p: &Palette) {
-    let Some(chat) = state.open_chat.as_ref().filter(|c| !c.key.is_group()) else { return };
-    let Some((_, rang)) = state.incoming_call.as_ref().filter(|(key, _)| *key == chat.pubkey) else { return };
-    let Some(left) = CALL_BANNER.checked_sub(rang.elapsed()) else { return };
-    ui.ctx().request_repaint_after(left);
-    Frame::NONE.fill(p.field).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.add(egui::Label::new(RichText::new(tr(lang, Key::IncomingCall)).size(13.).color(p.text)).selectable(false));
-    });
+    (toggle, more, calling)
 }
 
 fn handle(app: &mut MimirDesktop, ctx: &egui::Context, action: Action, m: &MsgRef) {
     let text = m.text.clone();
     match action {
         Action::Copy => ctx.copy_text(text),
+        Action::Link(url) => crate::platform::handle(app, ctx, &crate::platform::Ext::Link(url)),
         Action::Reply(guid) => {
             app.state.reply_to = Some((guid, text));
             app.state.composer.focus();
@@ -706,19 +715,40 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     let lang = app.lang;
     let ctx = ui.ctx().clone();
     let mut actions = vec![];
-    {
-        let (toggle, more) = header(ui, &mut app.state, &app.paths.core_dir, lang, p);
-        call_banner(ui, &app.state, lang, p);
-        app.state.info_open ^= toggle;
-        if let Some(more) = more {
-            info_panel::menu(app, &more);
-        }
-    }
     // A channel cannot be written to in v1; a read-only group (removed, banned, deleted) has no composer.
     // Read-only by the stored flag or the subscription state (the same rule as the info panel's).
     let group = app.state.chats.iter().find(|r| r.key == key).and_then(|r| r.group);
     let is_channel = group.is_some_and(|g| g.is_channel);
     let read_only = group.is_some_and(|g| g.read_only) || app.state.open_chat.as_ref().is_some_and(|c| c.key.is_group() && c.status == GroupStatus::ReadOnly);
+    {
+        // The call button: a contact's call (Saved Messages shows it disabled), or a group call in a group we can
+        // write to (its invite is posted there).
+        let call_btn = match key {
+            ChatKey::SAVED => Some((false, tr(lang, Key::MakeCall), tr(lang, Key::MakeCall))),
+            ChatKey::Contact(_) => {
+                let (can, hint) = call::can_call(app);
+                Some((can, tr(lang, Key::MakeCall), hint))
+            }
+            ChatKey::Group(_) if is_channel || read_only => None,
+            ChatKey::Group(_) => {
+                let (can, hint) = call::can_group_call(app);
+                Some((can, tr(lang, Key::StartGroupCall), hint))
+            }
+        };
+        let (toggle, more, calling) = header(ui, &mut app.state, &app.paths.core_dir, lang, p, call_btn);
+        match key {
+            ChatKey::Group(id) if calling => call::start_group(app, id),
+            _ if calling => {
+                let pubkey = app.state.open_chat.as_ref().map(|c| c.pubkey.clone()).unwrap_or_default();
+                call::start(app, pubkey);
+            }
+            _ => {}
+        }
+        app.state.info_open ^= toggle;
+        if let Some(more) = more {
+            info_panel::menu(app, &more);
+        }
+    }
     if is_channel {
         Panel::bottom("composer").resizable(false).show_separator_line(false).frame(Frame::NONE.fill(p.list_bg).inner_margin(12)).show(ui, |ui| {
             ui.vertical_centered(|ui| ui.label(RichText::new(tr(lang, Key::ChannelsNextVersion)).color(p.text_dim)));
@@ -792,32 +822,6 @@ mod tests {
         h.state_mut().state.selected = Some(ChatKey::SAVED);
         h.run();
         h
-    }
-
-    #[test]
-    fn call_banner_shown() {
-        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
-        let core = h.state().core.clone();
-        let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        h.state_mut().rx = rx;
-        h.state_mut().state.chats = crate::model::chat_list::build_chat_list(&core, Lang::Ru);
-        h.state_mut().state.selected = Some(ChatKey::Contact(c));
-        h.run();
-        let text = "Входящий звонок — ответьте на телефоне";
-        assert!(h.query_by_label(text).is_none());
-        tx.send(crate::core::events::Event::IncomingCall { pubkey: vec![8; 32] }).unwrap();
-        h.run();
-        assert!(h.query_by_label(text).is_none(), "another contact rang");
-        tx.send(crate::core::events::Event::IncomingCall { pubkey: vec![7; 32] }).unwrap();
-        h.run();
-        let banner = h.get_by_label(text).rect();
-        let title = h.get_by_role_and_label(Role::Label, "Аня").rect();
-        assert!(banner.top() > title.bottom(), "under the header: {banner:?} {title:?}");
-        let rang = std::time::Instant::now() - std::time::Duration::from_secs(61);
-        h.state_mut().state.incoming_call.as_mut().unwrap().1 = rang;
-        h.run();
-        assert!(h.query_by_label(text).is_none(), "gone after a minute");
     }
 
     #[test]

@@ -69,6 +69,7 @@ impl Player {
                 let mut out: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
                 run(rx, shared, lens, ctx, worker, lang, move |path| {
                     drop(out.take()); // one device open at a time
+                    crate::media::pin_audio_enumerator();
                     let stream = rodio::OutputStream::try_default().map_err(|e| e.to_string())?;
                     let sink = rodio::Sink::try_new(&stream.1).map_err(|e| e.to_string())?;
                     let sound = Decoded::open(path)?;

@@ -33,6 +33,8 @@ enum Block {
     /// downloads it; `progress`: a transfer runs (ring instead of the icon); `audio`: an audio file on disk whose icon
     /// box plays it inline (Some(playing now)).
     File { name: Arc<Galley>, size: Arc<Galley>, label: String, progress: Option<f32>, open: bool, audio: Option<bool> },
+    /// A call record: the file panel's look with a phone icon; nothing to click.
+    Call { name: Arc<Galley>, size: Arc<Galley>, label: String },
 }
 
 pub struct Attachment {
@@ -114,18 +116,31 @@ pub fn prepare(ui: &Ui, guid: i64, msg_type: i32, meta: &AttachmentMeta, files_d
         None if meta.size > 0 => format_size(meta.size, lang),
         None => String::new(),
     };
+    let (name, size, panel) = panel_text(ui, &label, size_text, p, wrap);
+    let progress = progress.map(|(done, total)| if total > 0 { (done as f32 / total as f32).clamp(0., 1.) } else { 0. });
+    let audio = (k == AttachmentKind::Audio && path.is_some() && progress.is_none()).then(|| player.state().is_playing(guid));
+    Attachment { block: Block::File { name, size, label, progress, open: path.is_some(), audio }, size: panel, file: path }
+}
+
+/// The file panel's bold name (up to two rows) and size line, and the panel's size with its icon box.
+fn panel_text(ui: &Ui, label: &str, size_text: String, p: &Palette, wrap: f32) -> (Arc<Galley>, Arc<Galley>, Vec2) {
     let text_w = FILE_MAX_W.min(wrap) - ICON - 8.;
     let mut job = LayoutJob::default();
     job.wrap = eframe::egui::text::TextWrapping { max_width: text_w, max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
     // ponytail: egui ellipsizes at the end, Android in the middle.
-    job.append(&label, 0., TextFormat { font_id: FontId::new(15., FontFamily::Name("bold".into())), color: p.text, ..Default::default() });
+    job.append(label, 0., TextFormat { font_id: FontId::new(15., FontFamily::Name("bold".into())), color: p.text, ..Default::default() });
     let name = ui.fonts_mut(|f| f.layout_job(job));
     let size = ui.painter().layout(size_text, FontId::proportional(13.), p.text.gamma_multiply(0.7), text_w);
     let h = ICON.max(name.size().y + 2. + size.size().y) + 8.;
     let w = ICON + 8. + name.size().x.max(size.size().x);
-    let progress = progress.map(|(done, total)| if total > 0 { (done as f32 / total as f32).clamp(0., 1.) } else { 0. });
-    let audio = (k == AttachmentKind::Audio && path.is_some() && progress.is_none()).then(|| player.state().is_playing(guid));
-    Attachment { block: Block::File { name, size, label, progress, open: path.is_some(), audio }, size: vec2(w, h), file: path }
+    (name, size, vec2(w, h))
+}
+
+/// A call record (Android MessageAdapter type 2): the file panel with a phone icon, the kind of call and its length.
+pub fn call_record(ui: &Ui, label: &str, duration: String, p: &Palette, wrap: f32) -> Attachment {
+    let spoken = if duration.is_empty() { label.to_string() } else { format!("{label}, {duration}") };
+    let (name, size, panel) = panel_text(ui, label, duration, p, wrap);
+    Attachment { block: Block::Call { name, size, label: spoken }, size: panel, file: None }
 }
 
 fn picture(tex: Option<TextureHandle>, img: Vec2, file: Option<PathBuf>) -> Attachment {
@@ -180,6 +195,18 @@ impl Attachment {
                 (resp, open)
             }
             Block::Voice(v) => v.show(ui, min, id, p, lang),
+            Block::Call { name, size, label } => {
+                let icon = Rect::from_min_size(pos2(min.x, rect.center().y - ICON / 2.), Vec2::splat(ICON));
+                let resp = ui.interact(rect, id, Sense::click());
+                resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
+                painter.rect_filled(icon, 3, p.file_icon);
+                crate::ui::call::phone_icon(ui, icon.center(), 20., p.text, false);
+                let text_h = name.size().y + 2. + size.size().y;
+                let text_min = pos2(icon.right() + 8., rect.center().y - text_h / 2.);
+                painter.galley(text_min, name, p.text);
+                painter.galley(text_min + vec2(0., text_h - size.size().y), size, p.text);
+                (resp, None)
+            }
             Block::File { name, size, label, progress, open, audio } => {
                 let icon = Rect::from_min_size(pos2(min.x, rect.center().y - ICON / 2.), Vec2::splat(ICON));
                 if progress.is_some() {

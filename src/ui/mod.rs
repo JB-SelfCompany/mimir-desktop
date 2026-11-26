@@ -2,6 +2,7 @@ pub mod add_contact;
 pub mod attach_panel;
 pub mod attachment_bubble;
 pub mod avatar;
+pub mod call;
 pub mod bubble;
 pub mod chat_list;
 pub mod chat_view;

@@ -34,11 +34,14 @@ pub struct Focus {
     pub focused: bool,
     /// The UI language, for the notification texts.
     pub lang: Lang,
+    /// A call rings or runs (either kind): notices come without the alert sound.
+    pub in_call: bool,
 }
 
 /// Title and body of the notification `ev` calls for, if any (Android rules: not for the open chat while the window
 /// has focus, muted chats, our own or already read messages (a sibling's catch-up brings rows read on the phone),
-/// reactions, call records or system rows). A call ignores mute: it is urgent.
+/// reactions, call records or system rows). A call ignores mute: it is urgent; it is not announced while the window
+/// has focus (its dialog is up).
 pub fn decide(core: &MimirApp, ev: &Event, focus: &Focus) -> Option<(String, String)> {
     let lang = focus.lang;
     let open = |key: ChatKey| focus.focused && focus.chat == Some(key);
@@ -70,15 +73,15 @@ pub fn decide(core: &MimirApp, ev: &Event, focus: &Focus) -> Option<(String, Str
             let inviter = contact_name(core, &inv.from_pubkey);
             Some((tr(lang, Key::GroupJoinTitle).to_string(), format!("{} — {inviter}", inv.chat_name)))
         }
-        Event::IncomingCall { pubkey } => {
-            let contact = core.get_contact_by_pubkey(pubkey.clone());
-            if contact.as_ref().is_some_and(|c| open(ChatKey::Contact(c.id))) {
-                return None;
-            }
-            Some((contact_name(core, pubkey), tr(lang, Key::IncomingCall).to_string()))
-        }
+        // The window in front shows the call's own dialog instead.
+        Event::IncomingCall { pubkey } if !focus.focused => Some((contact_name(core, pubkey), tr(lang, Key::IncomingCall).to_string())),
         _ => None,
     }
+}
+
+/// Whether the notice for `ev` plays the alert: not over a ringtone or a call (Android plays only the ringtone).
+pub fn alert(ev: &Event, focus: &Focus) -> bool {
+    !focus.in_call && !matches!(ev, Event::IncomingCall { .. })
 }
 
 fn contact_name(core: &MimirApp, pubkey: &[u8]) -> String {
@@ -111,10 +114,10 @@ fn claim_waiter(waiting: &AtomicUsize) -> bool {
 }
 
 /// The toast and the alert sound, on a thread of their own (both can block). The thread then waits for the toast to be
-/// clicked (the window comes back) or closed. `lang`: the click action's label.
+/// clicked (the window comes back) or closed. `lang`: the click action's label; `alert`: whether the sound plays.
 /// ponytail: a toast the OS never reports closed keeps its thread; past `MAX_WAITING` such threads a new toast is not
 /// waited on, and a click on it does nothing.
-pub fn show(title: String, body: String, lang: Lang, tx: Sender<Event>, ctx: egui::Context) {
+pub fn show(title: String, body: String, alert: bool, lang: Lang, tx: Sender<Event>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut n = notify_rust::Notification::new();
         n.appname("Mimir").summary(&title).body(&body);
@@ -130,7 +133,7 @@ pub fn show(title: String, body: String, lang: Lang, tx: Sender<Event>, ctx: egu
             tracing::warn!("notification failed: {e}");
         }
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        if claim_alert(&LAST_ALERT, now_ms) {
+        if alert && claim_alert(&LAST_ALERT, now_ms) {
             play_alert();
         }
         if let Ok(handle) = shown
@@ -151,6 +154,7 @@ fn clicked(r: &NotificationResponse, tx: &Sender<Event>, ctx: &egui::Context) {
 
 /// Plays `ALERT` on a short-lived output stream (the player's stream lives on its own thread).
 fn play_alert() {
+    crate::media::pin_audio_enumerator();
     let Ok((_stream, out)) = rodio::OutputStream::try_default() else { return };
     let Ok(sink) = rodio::Sink::try_new(&out) else { return };
     match crate::media::player::embedded(ALERT, "wav") {
@@ -167,10 +171,18 @@ mod tests {
     use super::*;
     use crate::{model::message::reaction_payload, test_support::test_app};
 
-    const FOCUSED: Focus = Focus { chat: None, focused: true, lang: Lang::Ru };
+    const FOCUSED: Focus = Focus { chat: None, focused: true, lang: Lang::Ru, in_call: false };
 
     fn msg(contact_id: i64, message_id: i64, msg_type: i32) -> Event {
         Event::MessageReceived { contact_id, message_id, msg_type, reply_to: 0 }
+    }
+
+    #[test]
+    fn no_alert_over_a_call() {
+        let (hi, ring) = (msg(1, 2, 0), Event::IncomingCall { pubkey: vec![7; 32] });
+        assert!(alert(&hi, &FOCUSED));
+        assert!(!alert(&ring, &FOCUSED), "the ringtone plays instead");
+        assert!(!alert(&hi, &Focus { in_call: true, ..FOCUSED }), "a message during a call: toast only");
     }
 
     #[test]
@@ -222,7 +234,7 @@ mod tests {
         let c = core.add_contact(vec![7; 32], "Аня".into()).unwrap();
         let hi = core.add_local_message(c, 1, 0, true, false, 1000, 0, 0, "привет".as_bytes().to_vec()).unwrap();
         let ev = msg(c, hi, 0);
-        let open = |focused| Focus { chat: Some(ChatKey::Contact(c)), focused, lang: Lang::Ru };
+        let open = |focused| Focus { chat: Some(ChatKey::Contact(c)), focused, ..FOCUSED };
         let some = |t: &str, b: &str| Some((t.to_string(), b.to_string()));
         assert_eq!(decide(&core, &ev, &open(true)), None, "open chat, focused window");
         assert_eq!(decide(&core, &ev, &open(false)), some("Аня", "привет"), "open chat, window away");
@@ -259,12 +271,14 @@ mod tests {
         let invite = Event::GroupInviteReceived { invite_id: 42, chat_id: 8, from_pubkey: vec![7; 32] };
         assert_eq!(decide(&core, &invite, &FOCUSED), some("Приглашение в группу", "Дача — Аня"));
         let call = Event::IncomingCall { pubkey: vec![7; 32] };
-        assert_eq!(decide(&core, &call, &FOCUSED), some("Аня", "Входящий звонок — ответьте на телефоне"));
-        assert_eq!(decide(&core, &call, &open(true)), None, "the chat shows the banner instead");
+        let away = Focus { focused: false, ..FOCUSED };
+        assert_eq!(decide(&core, &call, &away), some("Аня", "Входящий звонок"));
+        assert_eq!(decide(&core, &call, &FOCUSED), None, "the window shows the call dialog instead");
+        assert_eq!(decide(&core, &call, &open(false)), some("Аня", "Входящий звонок"), "its chat open, window away");
         core.set_contact_muted(c, true).unwrap();
-        assert_eq!(decide(&core, &call, &FOCUSED), some("Аня", "Входящий звонок — ответьте на телефоне"), "a call ignores mute");
+        assert_eq!(decide(&core, &call, &away), some("Аня", "Входящий звонок"), "a call ignores mute");
         let stranger = Event::IncomingCall { pubkey: vec![0xAB; 32] };
-        assert_eq!(decide(&core, &stranger, &Focus { lang: Lang::En, ..FOCUSED }), some("abababab", "Incoming call — answer on your phone"));
+        assert_eq!(decide(&core, &stranger, &Focus { lang: Lang::En, ..away }), some("abababab", "Incoming audio call"));
         assert_eq!(decide(&core, &Event::ContactConnected { pubkey: vec![7; 32] }, &FOCUSED), None);
     }
 }

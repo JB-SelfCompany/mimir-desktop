@@ -219,8 +219,12 @@ pub struct AppState {
     pub quitting: bool,
     /// The window was closed to the tray (or minimized on Wayland) and not shown since: it has no focus.
     pub hidden: bool,
-    /// The last incoming call (caller's key, when it rang): the caller's chat shows a banner for a minute.
-    pub incoming_call: Option<(Vec<u8>, Instant)>,
+    /// The 1:1 call ringing, being dialled or running (one at a time, as in the core).
+    pub call: Option<crate::ui::call::Call>,
+    /// The group call being joined or running (never together with `call`).
+    pub group_call: Option<crate::ui::call::GroupCall>,
+    /// A `mimir://gc/…` link waiting for «Войти» in the join dialog.
+    pub join_group_call: Option<String>,
 }
 
 #[cfg(test)]

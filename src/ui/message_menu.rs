@@ -29,6 +29,8 @@ pub enum Action {
     Play,
     /// Move the playing voice message to this fraction of its length.
     Seek(f32),
+    /// A `mimir://` link in the text was clicked: handled here, as one from the OS.
+    Link(String),
 }
 
 fn item(ui: &mut Ui, label: &str, shortcut: &str) -> bool {

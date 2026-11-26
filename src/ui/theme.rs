@@ -107,6 +107,8 @@ pub fn install(ctx: &Context) {
     fam.insert(FontFamily::Monospace, vec!["noto-mono".into(), "noto-emoji".into()]);
     fam.insert(FontFamily::Name("bold".into()), vec!["noto-sans-bold".into(), "noto-emoji".into()]);
     ctx.set_fonts(fonts);
+    // The SVG icons in assets/icons.
+    egui_extras::install_image_loaders(ctx);
 
     for (theme, dark) in [(Theme::Dark, true), (Theme::Light, false)] {
         let p = palette(dark);
