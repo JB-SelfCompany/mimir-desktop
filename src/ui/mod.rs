@@ -22,6 +22,7 @@ pub mod record_bar;
 pub mod requests;
 pub mod settings;
 pub mod shell;
+pub mod video_rec;
 pub mod voice_bubble;
 pub mod welcome;
 pub mod theme;

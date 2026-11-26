@@ -419,9 +419,9 @@ impl MimirDesktop {
                     }
                 }
                 Event::WorkDone(WorkResult::GroupCreated { chat_id }) => {
-                    self.state.new_group = None;
+                    let channel = self.state.new_group.take().is_some_and(|d| d.channel);
                     self.state.selected = Some(ChatKey::Group(*chat_id));
-                    self.notice(crate::i18n::Key::ChatCreated);
+                    self.notice(if channel { crate::i18n::Key::ChannelCreated } else { crate::i18n::Key::ChatCreated });
                 }
                 Event::WorkDone(WorkResult::GroupJoined { chat_id }) => join_group::joined(self, *chat_id),
                 Event::WorkDone(WorkResult::InviteAccepted { chat_id }) => invites::accepted(self, *chat_id),
@@ -429,7 +429,7 @@ impl MimirDesktop {
                 // Live: the list and the toolbar icon follow the event, unlike Android's onResume.
                 Event::GroupInviteReceived { .. } => invites::refresh(self),
                 Event::MediatorAuthenticated { .. } => join_group::retry_lookup(self),
-                Event::WorkDone(WorkResult::Failed { what: "join_public_group", err }) if self.state.join.as_ref().is_some_and(|d| d.joining) => {
+                Event::WorkDone(WorkResult::Failed { what: "join_public_group" | "join_public_channel", err }) if self.state.join.as_ref().is_some_and(|d| d.joining) => {
                     join_group::join_failed(self, err);
                 }
                 Event::WorkDone(WorkResult::Failed { what: "accept_group_invite", err }) if self.state.invites_ui.busy.is_some() => {

@@ -458,8 +458,9 @@ fn header(ui: &mut Ui, state: &mut AppState, data_dir: &Path, lang: Lang, p: &Pa
             let (members, on) = (chat.counts.0.to_string(), chat.counts.1.to_string());
             let status = if group {
                 Some(match (chat.status, is_channel) {
-                    (GroupStatus::ReadOnly, _) => tr(lang, Key::ReadOnly).to_string(),
+                    // A subscriber is read-only by design: a channel always shows its counts (Android applyReadOnlyMode).
                     (_, true) => trf(lang, Key::ChannelSubscribers, &[&members, &on]),
+                    (GroupStatus::ReadOnly, false) => tr(lang, Key::ReadOnly).to_string(),
                     (_, false) => trf(lang, Key::MemberCount, &[&members, &on]),
                 })
             } else if saved {
@@ -621,8 +622,8 @@ fn forward_dialog(app: &mut MimirDesktop, ctx: &egui::Context) {
         ui.add(TextEdit::singleline(&mut dlg.query).hint_text(tr(lang, Key::Search)).desired_width(f32::INFINITY));
         let q = dlg.query.to_lowercase();
         ScrollArea::vertical().max_height(300.).show(ui, |ui| {
-            // A channel cannot be written to in v1, and a read-only group has no composer.
-            let writable = |r: &&crate::model::chat_list::ChatRow| r.group.is_none_or(|g| !g.is_channel && !g.read_only);
+            // Only chats with a composer: no read-only group, no channel of somebody else's.
+            let writable = |r: &&crate::model::chat_list::ChatRow| r.group.is_none_or(|g| g.can_post());
             for row in app.state.chats.iter().filter(writable).filter(|r| r.name.to_lowercase().contains(&q)) {
                 let w = ui.available_width();
                 let r = crate::ui::theme::click_row(ui, |ui| {
@@ -662,8 +663,15 @@ fn forward_dialog(app: &mut MimirDesktop, ctx: &egui::Context) {
     }
 }
 
+/// No composer drawn, so no recording dialog either: a take in progress stops and is thrown away.
+fn stop_takes(app: &mut MimirDesktop) {
+    app.state.composer.video.reset();
+    app.state.composer.voice.reset();
+}
+
 pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     let Some(key) = app.state.selected else {
+        stop_takes(app);
         ui.centered_and_justified(|ui| ui.label(RichText::new(tr(app.lang, Key::SelectChat)).size(14.).color(p.text_dim)));
         return;
     };
@@ -675,6 +683,7 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
         };
         let Some(pubkey) = pubkey else {
             app.state.selected = None;
+            stop_takes(app);
             return;
         };
         composer::switch_chat(app, app.state.open_chat.as_ref().map(|c| c.key), key);
@@ -715,8 +724,8 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     let lang = app.lang;
     let ctx = ui.ctx().clone();
     let mut actions = vec![];
-    // A channel cannot be written to in v1; a read-only group (removed, banned, deleted) has no composer.
-    // Read-only by the stored flag or the subscription state (the same rule as the info panel's).
+    // A read-only group (removed, banned, deleted) has no composer, nor has a channel for anyone but its owner (Android
+    // hides the tools; the header still shows the subscriber count). Read-only by the stored flag or the subscription state.
     let group = app.state.chats.iter().find(|r| r.key == key).and_then(|r| r.group);
     let is_channel = group.is_some_and(|g| g.is_channel);
     let read_only = group.is_some_and(|g| g.read_only) || app.state.open_chat.as_ref().is_some_and(|c| c.key.is_group() && c.status == GroupStatus::ReadOnly);
@@ -749,12 +758,10 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
             info_panel::menu(app, &more);
         }
     }
-    if is_channel {
-        Panel::bottom("composer").resizable(false).show_separator_line(false).frame(Frame::NONE.fill(p.list_bg).inner_margin(12)).show(ui, |ui| {
-            ui.vertical_centered(|ui| ui.label(RichText::new(tr(lang, Key::ChannelsNextVersion)).color(p.text_dim)));
-        });
-    } else if !read_only {
+    if !read_only && group.is_none_or(|g| g.can_post()) {
         Panel::bottom("composer").resizable(false).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| composer::show(app, ui, p));
+    } else {
+        stop_takes(app);
     }
     let core = app.core.clone();
     let name = app.state.chats.iter().find(|r| Some(r.key) == app.state.selected).map_or(String::new(), |r| r.name.clone());
@@ -939,6 +946,28 @@ mod tests {
         assert_eq!(h.state().state.open_chat.as_ref().unwrap().status, GroupStatus::ReadOnly);
     }
 
+    #[test] fn take_stops_when_the_composer_goes() {
+        // The group turns read-only mid-take (deleted elsewhere): the dialog went with the composer, so must the take.
+        let mut h = group_chat(0, |_| {});
+        h.state_mut().state.core_started = true;
+        h.state_mut().state.ffmpeg = Some("ffmpeg".into());
+        let file = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let seen = file.clone();
+        crate::ui::video_rec::set_camera(move |out| {
+            *seen.borrow_mut() = Some(out.clone());
+            crate::media::camera::Camera::fake(5_000, &["cam"], out)
+        });
+        h.run_steps(2);
+        h.get_by_label("Записать видеосообщение").click();
+        h.run_steps(2);
+        assert!(h.state().state.composer.video.recording());
+        h.state_mut().state.open_chat.as_mut().unwrap().status = GroupStatus::ReadOnly;
+        h.run_steps(2);
+        assert!(!h.state().state.composer.video.recording(), "no composer: the take is cancelled");
+        let f = file.borrow().clone().unwrap();
+        crate::test_support::run_until(&mut h, "the take's file is deleted", |_| !f.exists());
+    }
+
     #[test] fn group_reply_quotes_name_the_member() {
         let t = now_ms() - 10_000;
         let h = group_chat(0, |core| {
@@ -951,16 +980,28 @@ mod tests {
         assert!(h.query_by_label("Вы: мой").is_some(), "Митя's reply quotes me");
     }
 
-    #[test] fn channel_shows_notice_instead_of_composer() {
-        let h = group_chat(1, |_| {});
-        assert!(h.query_by_role(Role::MultilineTextInput).is_none());
-        assert!(h.query_by_label("Каналы — в следующей версии").is_some());
+    #[test] fn channel_composer_is_the_owners_only() {
+        // A subscriber (somebody else's channel, read-only by design): no composer, the counts stay in the header.
+        let mut h = group_chat(1, |core| core.set_group_chat_read_only(7, true).unwrap());
+        h.state_mut().state.open_chat.as_mut().unwrap().counts = (40, 3); // as Event::ChatStats sets them
+        h.run();
+        assert!(h.query_by_role(Role::MultilineTextInput).is_none(), "no composer for a subscriber");
+        assert!(h.query_by_label("40 подписчиков, 3 в сети").is_some(), "subscribers, not «Только чтение»");
+        assert!(h.query_by_label("Только чтение").is_none());
+        assert!(h.query_by_label_contains("в следующей версии").is_none(), "the v1 placeholder is gone");
+        // Our own channel: the owner posts.
+        let h = group_chat(1, |core| {
+            core.save_group_chat(7, "Семья".into(), String::new(), None, vec![9; 32], core.public_key(), vec![3; 32], 1).unwrap();
+        });
+        assert!(h.query_by_role(Role::MultilineTextInput).is_some(), "the owner has a composer");
+        assert!(h.query_by_label("0 подписчиков, 0 в сети").is_some());
     }
 
     #[test] fn forward_dialog_lists_writable_groups_only() {
         let mut h = group_chat(0, |core| {
             core.save_group_chat(8, "Канал".into(), String::new(), None, vec![9; 32], vec![], vec![3; 32], 1).unwrap();
             core.save_group_chat(9, "Старая".into(), String::new(), None, vec![9; 32], vec![], vec![3; 32], 0).unwrap();
+            core.save_group_chat(10, "Мой канал".into(), String::new(), None, vec![9; 32], core.public_key(), vec![3; 32], 1).unwrap();
             core.set_group_chat_read_only(9, true).unwrap();
             core.add_group_message(7, 1, 11, vec![1; 32], now_ms() - 10_000, 0, false, "привет".as_bytes().to_vec(), 0, false).unwrap();
         });
@@ -968,10 +1009,12 @@ mod tests {
         h.run();
         h.get_by_label_contains("Переслать").click();
         h.run();
-        let in_dialog = |h: &Harness<'static, MimirDesktop>, t: &str| h.query_all_by_label(t).any(|n| n.rect().left() > 250.);
         assert!(h.state().state.forward.is_some());
         assert!(h.query_all_by_label("Семья").count() >= 2, "listed in the dialog as well as the chat list");
-        assert!(!in_dialog(&h, "Канал") && !in_dialog(&h, "Старая"), "no channel, no read-only group");
+        // Each listed once (the chat list) unless the dialog lists it too; a dialog row starts at x = 250.
+        let count = |t: &str| h.query_all_by_label(t).count();
+        assert!(count("Канал") == 1 && count("Старая") == 1, "no channel of somebody else's, no read-only group");
+        assert!(h.query_all_by_label("Мой канал").count() >= 2, "our own channel takes posts: listed in the dialog too");
     }
 
     #[test] fn forward_rows_show_avatars() {

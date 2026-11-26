@@ -1,6 +1,7 @@
-//! Create-group dialog (Android GroupChatEditActivity, create mode): name, description, mediator, public switch.
-//! `create_group` blocks on the network plus proof-of-work for seconds, so it runs on the worker; the dialog stays
-//! open (spinner, no buttons) until the result comes back.
+//! Create-group and create-channel dialog (Android GroupChatEditActivity, create mode): name, description, mediator,
+//! public switch; a channel swaps in the channel wording. `create_group` / `create_channel` block on the network
+//! plus proof-of-work for seconds, so they run on the worker; the dialog stays open (spinner, no buttons) until the
+//! result comes back.
 use crate::{
     app::MimirDesktop,
     i18n::{tr, Key},
@@ -16,6 +17,8 @@ pub(crate) const MAX_DESCRIPTION: usize = 200;
 
 #[derive(Default)]
 pub struct NewGroupDialog {
+    /// A channel (only we post, subscribers read) rather than a group.
+    pub channel: bool,
     pub name: String,
     pub description: String,
     pub public: bool,
@@ -33,10 +36,10 @@ pub struct NewGroupDialog {
     pub submitted_avatar: Option<Vec<u8>>,
 }
 
-pub fn open(app: &mut MimirDesktop) {
+pub fn open(app: &mut MimirDesktop, channel: bool) {
     let mediators = app.core.get_mediators();
     let default = app.core.get_default_mediator().or_else(|| mediators.first().map(|m| m.pubkey.clone()));
-    app.state.new_group = Some(NewGroupDialog { mediators, mediator: default, ..Default::default() });
+    app.state.new_group = Some(NewGroupDialog { channel, mediators, mediator: default, ..Default::default() });
 }
 
 /// Mediator name, or the first 8 hex digits of its key.
@@ -53,7 +56,7 @@ fn submit(app: &mut MimirDesktop) {
         return;
     }
     let Some(mediator) = d.mediator.clone() else { return };
-    let (public, avatar) = (d.public, d.avatar.bytes.clone());
+    let (public, avatar, channel) = (d.public, d.avatar.bytes.clone(), d.channel);
     d.busy = true;
     d.error = None;
     #[cfg(test)]
@@ -62,12 +65,16 @@ fn submit(app: &mut MimirDesktop) {
     }
     // Tests do not run the job: create_group dials and mines, and an unreachable mediator holds the worker for seconds.
     #[cfg(not(test))]
-    app.group_worker.submit(Box::new(move |core| match core.create_group(mediator, name, description, avatar, public) {
-        Ok(chat_id) => crate::core::worker::WorkResult::GroupCreated { chat_id },
-        Err(e) => crate::core::worker::WorkResult::Failed { what: "create_group", err: e.to_string() },
+    app.group_worker.submit(Box::new(move |core| {
+        let made = if channel { core.create_channel(mediator, name, description, avatar, public) } else { core.create_group(mediator, name, description, avatar, public) };
+        match made {
+            Ok(chat_id) => crate::core::worker::WorkResult::GroupCreated { chat_id },
+            // One label for both: the dialog shows the failure either way.
+            Err(e) => crate::core::worker::WorkResult::Failed { what: "create_group", err: e.to_string() },
+        }
     }));
     #[cfg(test)]
-    let _ = (mediator, name, description, public);
+    let _ = (mediator, name, description, public, channel);
 }
 
 /// A text field with its «N/max» counter under it; true when the text was edited this frame.
@@ -93,7 +100,13 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         ui.set_width(420.);
         let p = palette(ui.visuals().dark_mode);
         let Some(d) = app.state.new_group.as_mut() else { return };
-        dialog_title(ui, tr(lang, Key::CreateNewGroup));
+        // Android applyChannelLabels: the same form with the channel wording.
+        let channel = d.channel;
+        let k = move |group, chan| if channel { chan } else { group };
+        dialog_title(ui, tr(lang, k(Key::CreateNewGroup, Key::CreateNewChannel)));
+        if channel {
+            ui.label(RichText::new(tr(lang, Key::CreateChannelInfo)).size(12.).color(p.text_dim));
+        }
         ui.add_enabled_ui(!d.busy, |ui| {
             // The group avatar (≤ 200 KiB), 128 px; no chat id to colour the placeholder yet, so Android's grey.
             ui.vertical_centered(|ui| {
@@ -101,12 +114,12 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
                     d.avatar.start(ui.ctx(), tr(lang, Key::Image), GROUP_MAX);
                 }
             });
-            let l = field_label(ui, &p, tr(lang, Key::GroupName));
-            if counted(ui, &mut d.name, tr(lang, Key::GroupNameHint), false, MAX_NAME, &l) {
+            let l = field_label(ui, &p, tr(lang, k(Key::GroupName, Key::ChannelName)));
+            if counted(ui, &mut d.name, tr(lang, k(Key::GroupNameHint, Key::ChannelNameHint)), false, MAX_NAME, &l) {
                 d.error = None; // «name required» (or a create failure) goes once the name is edited
             }
-            let l = field_label(ui, &p, tr(lang, Key::GroupDescription));
-            counted(ui, &mut d.description, tr(lang, Key::GroupDescriptionHint), true, MAX_DESCRIPTION, &l);
+            let l = field_label(ui, &p, tr(lang, k(Key::GroupDescription, Key::ChannelDescription)));
+            counted(ui, &mut d.description, tr(lang, k(Key::GroupDescriptionHint, Key::ChannelDescriptionHint)), true, MAX_DESCRIPTION, &l);
             if d.mediators.len() >= 2 {
                 let l = field_label(ui, &p, tr(lang, Key::CreateOnMediator));
                 let current = d.mediators.iter().find(|m| Some(&m.pubkey) == d.mediator.as_ref()).map(picker_label).unwrap_or_default();
@@ -119,9 +132,9 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
                 .labelled_by(l.id);
             }
             ui.add_space(6.);
-            ui.checkbox(&mut d.public, tr(lang, Key::GroupPublicLabel));
+            ui.checkbox(&mut d.public, tr(lang, k(Key::GroupPublicLabel, Key::ChannelPublicLabel)));
             if d.public {
-                ui.label(RichText::new(tr(lang, Key::GroupPublicHint)).size(12.).color(p.text_dim));
+                ui.label(RichText::new(tr(lang, k(Key::GroupPublicHint, Key::ChannelPublicHint))).size(12.).color(p.text_dim));
             }
         });
         if d.mediators.is_empty() {
@@ -142,7 +155,7 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let enabled = started && !d.busy && d.mediator.is_some();
-            go = ui.add_enabled(enabled, primary_button(&p, tr(lang, Key::CreateGroup))).clicked();
+            go = ui.add_enabled(enabled, primary_button(&p, tr(lang, k(Key::CreateGroup, Key::CreateChannel)))).clicked();
             cancel = ui.add_enabled(!d.busy, egui::Button::new(tr(lang, Key::Cancel))).clicked();
         });
     });
@@ -175,7 +188,7 @@ mod tests {
         for (k, n) in mediators {
             h.state().core.add_mediator(k.to_vec(), n.to_string()).unwrap();
         }
-        open(h.state_mut());
+        open(h.state_mut(), false);
         h.run();
         h
     }
@@ -288,8 +301,46 @@ mod tests {
         let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
         h.get_by_label("Новый чат").click();
         h.run();
-        assert!(h.state().state.new_group.is_some());
+        assert!(h.state().state.new_group.is_none(), "a menu first");
+        h.get_by_role_and_label(Role::Button, "Создать группу").click();
+        h.run();
+        assert!(!dialog(&mut h).channel);
         assert!(!h.state().state.show_add_contact);
         assert!(h.query_by_label("Создать новую группу").is_some());
+    }
+
+    #[test]
+    fn toolbar_menu_creates_a_channel() {
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        let ctx = h.ctx.clone();
+        start_app(h.state_mut(), &ctx);
+        h.state_mut().state.core_started = true;
+        h.state().core.add_mediator(A.to_vec(), "Семья".into()).unwrap();
+        h.get_by_label("Новый чат").click();
+        h.run();
+        h.get_by_role_and_label(Role::Button, "Создать канал").click();
+        h.run();
+        assert!(dialog(&mut h).channel);
+        for text in ["Создать новый канал", "В канале пишете только вы. Подписчики читают.", "Название канала:", "Описание канала:"] {
+            assert!(h.query_by_label(text).is_some(), "{text}");
+        }
+        h.get_by_label("Публичный канал").click();
+        h.run();
+        assert!(h.query_by_label_contains("Подписаться сможет любой, у кого есть ссылка.").is_some());
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().rx = rx;
+        h.get_by_label("Название канала:").click();
+        h.get_by_label("Название канала:").type_text("Новости");
+        h.run();
+        h.get_by_role_and_label(Role::Button, "Создать канал").click();
+        h.step();
+        assert!(dialog(&mut h).busy);
+        h.state().core.save_group_chat(8, "Новости".into(), String::new(), None, A.to_vec(), h.state().core.public_key(), vec![3; 32], 3).unwrap();
+        tx.send(Event::WorkDone(WorkResult::GroupCreated { chat_id: 8 })).unwrap();
+        h.step();
+        h.step();
+        assert!(h.state().state.new_group.is_none());
+        assert_eq!(h.state().state.selected, Some(ChatKey::Group(8)));
+        assert_eq!(h.state().state.status.as_ref().map(|s| s.0.as_str()), Some("Канал создан!"));
     }
 }

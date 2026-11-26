@@ -3,24 +3,18 @@ use crate::{
     app::MimirDesktop,
     core::worker::WorkResult,
     i18n::{tr, Key},
-    model::{group_link::{parse_group_link, LinkKind}, links::{validate_new_contact, AddContactError}, AddContactDialog},
+    model::{group_link::parse_group_link, links::{validate_new_contact, AddContactError}, AddContactDialog},
     ui::join_group,
 };
 use crate::ui::theme::{dialog, dialog_title, field_label, palette, primary_button};
 use eframe::egui::{self, Align, Color32, Id, Layout, TextEdit};
 
-/// A group link in the key field goes to the join dialog, a channel link gets the «next version» notice.
-/// True when the input was a group or channel link.
+/// A group or channel link in the key field goes to the join dialog. True when the input was one.
 fn route_group_link(app: &mut MimirDesktop) -> bool {
     let Some(link) = parse_group_link(&app.state.add_dialog.key) else { return false };
-    match link.kind {
-        LinkKind::Channel => app.state.add_dialog.error = Some(Key::ChannelsNextVersion),
-        LinkKind::Group => {
-            app.state.add_dialog = AddContactDialog::default();
-            app.state.show_add_contact = false;
-            join_group::open(app, link);
-        }
-    }
+    app.state.add_dialog = AddContactDialog::default();
+    app.state.show_add_contact = false;
+    join_group::open(app, link);
     true
 }
 
@@ -221,14 +215,17 @@ mod tests {
         assert!(h.state().state.join.is_some());
     }
 
-    #[test] fn channel_link_shows_notice() {
+    #[test] fn channel_link_opens_subscribe() {
         let mut h = open_dialog(true);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().rx = rx;
         fill(&mut h, "", &format!("mimir://c/{MED}/123456#{KEY}"), "");
         h.get_by_label("Добавить контакт и послать запрос").click();
-        h.run();
-        assert!(h.state().state.show_add_contact, "stays open");
-        assert!(h.state().state.join.is_none());
-        assert!(h.query_by_label("Каналы — в следующей версии").is_some());
+        h.step();
+        h.step();
+        assert!(!h.state().state.show_add_contact);
+        assert_eq!(h.state().state.join.as_ref().expect("join dialog").link.kind, crate::model::group_link::LinkKind::Channel);
+        assert!(h.query_by_label("Приглашение в канал").is_some());
     }
 
     #[test] fn disabled_until_core_started() {

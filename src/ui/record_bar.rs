@@ -203,7 +203,7 @@ pub fn poll(app: &mut MimirDesktop) {
     }
 }
 
-fn round_button(ui: &mut Ui, size: f32, label: &str, fill: Color32, glyph: impl Fn(&Painter, Pos2)) -> bool {
+pub(crate) fn round_button(ui: &mut Ui, size: f32, label: &str, fill: Color32, glyph: impl Fn(&Painter, Pos2)) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
     let hover = if resp.hovered() { 1.1 } else { 1. };
@@ -222,13 +222,13 @@ fn mic_glyph(painter: &Painter, c: Pos2, colour: Color32) {
     painter.line_segment([c + vec2(-3.5, 8.), c + vec2(3.5, 8.)], s);
 }
 
-fn cross(painter: &Painter, c: Pos2, colour: Color32) {
+pub(crate) fn cross(painter: &Painter, c: Pos2, colour: Color32) {
     let (s, d) = (Stroke::new(1.8, colour), 5.);
     painter.line_segment([c + vec2(-d, -d), c + vec2(d, d)], s);
     painter.line_segment([c + vec2(-d, d), c + vec2(d, -d)], s);
 }
 
-fn check(painter: &Painter, c: Pos2, colour: Color32) {
+pub(crate) fn check(painter: &Painter, c: Pos2, colour: Color32) {
     painter.add(Shape::line(vec![c + vec2(-6., 0.), c + vec2(-2., 4.5), c + vec2(6., -4.5)], Stroke::new(2., colour)));
 }
 

@@ -70,9 +70,11 @@ fn row(ui: &mut Ui, r: &ChatRow, selected: bool, p: &Palette, thumbs: &mut Thumb
     let clip = Rect::from_min_max(rect.min, pos2(rect.right() - RIGHT_W, rect.bottom())).intersect(ui.clip_rect());
     let tg = g.with_clip_rect(clip);
     let mut name_x = text_x;
-    if r.group.is_some() {
-        // A 16 px people icon at alpha .7 before the name, for groups and channels alike.
-        paint_people(&tg, pos2(text_x, rect.top() + 12.), 16., p.text.gamma_multiply(0.7));
+    if let Some(g) = r.group {
+        // A 16 px icon at alpha .7 before the name: people for a group, Android's channel bullhorn for a channel.
+        // ponytail: Android puts the bullhorn in place of a missing channel avatar; here the name icon tells them apart.
+        let icon = if g.is_channel { paint_bullhorn } else { paint_people };
+        icon(&tg, pos2(text_x, rect.top() + 12.), 16., p.text.gamma_multiply(0.7));
         name_x += 20.;
     }
     let name = tg.text(pos2(name_x, rect.top() + 12.), Align2::LEFT_TOP, &r.name, FontId::new(13.5, FontFamily::Name("bold".into())), p.text);
@@ -107,6 +109,17 @@ fn paint_people(g: &Painter, at: Pos2, size: f32, c: Color32) {
     g.add(Shape::closed_line(front, s));
     g.add(Shape::line(arc(15., 7.5, 2.8, -100., 100.), s));
     g.add(Shape::line(arc(17., 18., 4., 250., 360.), s));
+}
+
+/// MDI bullhorn-outline (Android ic_bullhorn_outline) as strokes, in a `size` square at `at`.
+fn paint_bullhorn(g: &Painter, at: Pos2, size: f32, c: Color32) {
+    let k = size / 24.;
+    let pt = |x: f32, y: f32| at + vec2(x, y) * k;
+    let s = Stroke::new(2. * k, c);
+    // Mouthpiece and horn, the handle under it, and a sound wave in front.
+    g.add(Shape::closed_line([(3., 9.), (12., 9.), (16., 6.), (16., 18.), (12., 15.), (3., 15.)].map(|(x, y)| pt(x, y)).to_vec(), s));
+    g.add(Shape::line([(6., 15.), (6., 20.), (8., 20.), (8., 15.)].map(|(x, y)| pt(x, y)).to_vec(), s));
+    g.add(Shape::line((0..=8).map(|i| (-50. + 100. * i as f32 / 8.).to_radians()).map(|a: f32| pt(18. + 3. * a.cos(), 12. + 3. * a.sin())).collect(), s));
 }
 
 /// Bell with a slash: the chat is muted.

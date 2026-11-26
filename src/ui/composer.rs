@@ -4,7 +4,7 @@ use crate::{
     i18n::{tr, Key as K},
     media::stage::{self, Staged},
     model::{chat_key::ChatKey, send::{send_attachment, send_reaction, send_text, Target}, Forward},
-    ui::{attach_panel, record_bar, theme::Palette},
+    ui::{attach_panel, record_bar, theme::Palette, video_rec},
 };
 use eframe::egui::{
     self, pos2, vec2, Align, Button, Frame, Id, KeyboardShortcut, Label, Layout, Modifiers, Role, ScrollArea, Sense, Shape,
@@ -35,6 +35,8 @@ pub struct Composer {
     pub staging: Option<std::sync::mpsc::Receiver<attach_panel::Batch>>,
     /// Voice recording and its encode job (record_bar).
     pub voice: record_bar::Voice,
+    /// Video-message recording and its send job (video_rec).
+    pub video: video_rec::Video,
 }
 
 impl Composer {
@@ -69,6 +71,7 @@ pub fn switch_chat(app: &mut MimirDesktop, old: Option<ChatKey>, new: ChatKey) {
     // ponytail: a staged attachment is not part of the draft; switching chats drops it.
     app.state.composer.clear_attachments();
     app.state.composer.voice.reset();
+    app.state.composer.video.reset();
     app.state.reply_to = None;
     app.state.composer.load_draft(&app.core, new);
     app.state.composer.focus();
@@ -123,11 +126,14 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
     if focused {
         submit = ctx.input_mut(|i| !i.modifiers.shift && i.consume_key(Modifiers::NONE, egui::Key::Enter)) && started;
     }
-    if app.state.reply_to.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // Esc in the video dialog is the dialog's own (it cancels the take), not the reply's.
+    if app.state.reply_to.is_some() && !app.state.composer.video.recording() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.state.reply_to = None;
     }
     attach_panel::take_input(app, &ctx);
     record_bar::poll(app);
+    video_rec::poll(app);
+    video_rec::show(app, &ctx, p);
     if std::mem::take(&mut app.state.composer.want_focus) {
         ctx.memory_mut(|m| m.request_focus(id));
     }
@@ -158,7 +164,7 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
         }
         ui.horizontal(|ui| {
             pick = attach_panel::clip_button(ui, BUTTON, tr(lang, K::SendFile), started, p);
-            let w = ui.available_width() - BUTTON - ui.spacing().item_spacing.x;
+            let w = ui.available_width() - 2. * (BUTTON + ui.spacing().item_spacing.x);
             let c = &mut app.state.composer;
             // The row is only as tall as the previous frame's field, so the field is sized from that (up to 120 px, then it scrolls).
             let out = ScrollArea::vertical().max_height(120.).min_scrolled_height(c.input_h.max(BUTTON)).max_width(w).show(ui, |ui| {
@@ -183,6 +189,8 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
                 c.input_h = input_h;
                 ui.ctx().request_repaint(); // the bar is sized from this height; apply it now, not on the next input
             }
+            video_rec::button(app, ui, BUTTON, p);
+            let c = &app.state.composer;
             // An empty composer with no attachment records voice; anything to send makes it the send button.
             if c.text.trim().is_empty() && c.attachment.is_none() {
                 record_bar::mic(app, ui, BUTTON, p);

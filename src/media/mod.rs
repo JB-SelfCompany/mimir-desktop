@@ -1,6 +1,7 @@
 //! Media helpers: thumbnails and the attachment file actions (open with the system app, save as).
 pub mod avatar;
 pub mod call_audio;
+pub mod camera;
 pub mod ffmpeg;
 pub mod player;
 pub mod recorder;

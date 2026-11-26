@@ -1,10 +1,11 @@
-//! Join a public group by link (Android ChannelJoinActivity): look the group up, show it, join on confirm.
+//! Join a public group or subscribe to a public channel by link (Android ChannelJoinActivity): look the chat up, show
+//! it, join on confirm; the link's kind picks the core calls and the wording.
 //! Both calls block on the network, so they run on the worker; a failed lookup still allows a blind join.
 use crate::{
     app::MimirDesktop,
     core::worker::WorkResult,
     i18n::{tr, trf, Key},
-    model::{chat_key::ChatKey, group_link::GroupLink},
+    model::{chat_key::ChatKey, group_link::{GroupLink, LinkKind}},
     ui::theme::{dialog, dialog_title, palette, primary_button},
 };
 use eframe::egui::{self, Align, Id, Layout, RichText, Spinner};
@@ -14,6 +15,9 @@ use std::{sync::atomic::{AtomicU64, Ordering}, time::Duration};
 /// Android retries 6 times; desktop needs fewer.
 const LOOKUP_ATTEMPTS: u32 = 3;
 const LOOKUP_PAUSE: Duration = Duration::from_secs(2);
+
+/// The channel bit of a chat's flags (the core's mediator::protocol::CHAT_FLAG_CHANNEL, not exported).
+pub const CHAT_FLAG_CHANNEL: u8 = 0x01;
 
 /// Source of the lookup tokens: a result belongs to the dialog that asked only if the tokens match.
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -30,14 +34,19 @@ pub struct JoinDialog {
     pub error: Option<String>,
 }
 
-/// Opens the dialog and starts the lookup; a group we are already in opens its chat instead.
+/// The channel wording for a channel link, the group one otherwise.
+fn pick(kind: LinkKind, group: Key, channel: Key) -> Key {
+    if kind == LinkKind::Channel { channel } else { group }
+}
+
+/// Opens the dialog and starts the lookup; a group or channel we are already in opens its chat instead.
 pub fn open(app: &mut MimirDesktop, link: GroupLink) {
     if let Some(g) = app.core.get_group_chat(link.chat_id) {
         // The core keys groups by chat id alone: the same id on another mediator is not this group.
         if g.mediator_pubkey == link.mediator {
             app.state.selected = Some(ChatKey::Group(link.chat_id));
         } else {
-            app.error_text(tr(app.lang, Key::GroupJoinFailed).to_string());
+            app.error_text(tr(app.lang, pick(link.kind, Key::GroupJoinFailed, Key::ChannelJoinFailed)).to_string());
         }
         return;
     }
@@ -45,16 +54,25 @@ pub fn open(app: &mut MimirDesktop, link: GroupLink) {
     lookup(app);
 }
 
+/// Whether a lookup found what the link promised: a channel link's id must be a channel (join_public_channel refuses a
+/// group too); a group link takes what preview_public_group gives.
+fn as_linked(channel: bool, info: &mimir::ChannelInfo) -> bool {
+    !channel || info.flags & CHAT_FLAG_CHANNEL != 0
+}
+
 fn lookup(app: &mut MimirDesktop) {
     let Some(d) = app.state.join.as_mut() else { return };
     d.looking = true;
     d.token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let token = d.token;
-    let (mediator, chat_id) = (d.link.mediator.to_vec(), d.link.chat_id);
+    let (mediator, chat_id, channel) = (d.link.mediator.to_vec(), d.link.chat_id, d.link.kind == LinkKind::Channel);
     app.group_worker.submit(Box::new(move |core| {
         for attempt in 1..=LOOKUP_ATTEMPTS {
-            match core.preview_public_group(mediator.clone(), chat_id) {
-                Ok(info) => return WorkResult::Preview { token, info: Some(info) },
+            // preview_public_group refuses a channel; a channel link's id must be a channel too (CHAT_FLAG_CHANNEL).
+            let found = if channel { core.preview_public_channel(mediator.clone(), chat_id) } else { core.preview_public_group(mediator.clone(), chat_id) };
+            match found {
+                Ok(info) if as_linked(channel, &info) => return WorkResult::Preview { token, info: Some(info) },
+                Ok(_) => break, // a group behind a channel link: no preview (join_public_channel refuses it too)
                 // The mediator may still be connecting.
                 Err(MimirError::Connection(_)) if attempt < LOOKUP_ATTEMPTS => std::thread::sleep(LOOKUP_PAUSE),
                 Err(_) => break,
@@ -86,7 +104,7 @@ pub fn join_failed(app: &mut MimirDesktop, err: &str) {
     let lang = app.lang;
     if let Some(d) = app.state.join.as_mut() {
         d.joining = false;
-        d.error = Some(format!("{}: {err}", tr(lang, Key::GroupJoinFailed)));
+        d.error = Some(format!("{}: {err}", tr(lang, pick(d.link.kind, Key::GroupJoinFailed, Key::ChannelJoinFailed))));
     }
 }
 
@@ -95,9 +113,17 @@ fn join(app: &mut MimirDesktop) {
     d.joining = true;
     d.error = None;
     let (mediator, chat_id, key) = (d.link.mediator.to_vec(), d.link.chat_id, d.link.key.to_vec());
-    app.group_worker.submit(Box::new(move |core| match core.join_public_group(mediator, chat_id, key) {
-        Ok(chat_id) => WorkResult::GroupJoined { chat_id },
-        Err(e) => WorkResult::Failed { what: "join_public_group", err: e.to_string() },
+    let channel = d.link.kind == LinkKind::Channel;
+    app.group_worker.submit(Box::new(move |core| {
+        let (joined, what) = if channel {
+            (core.join_public_channel(mediator, chat_id, key), "join_public_channel")
+        } else {
+            (core.join_public_group(mediator, chat_id, key), "join_public_group")
+        };
+        match joined {
+            Ok(chat_id) => WorkResult::GroupJoined { chat_id },
+            Err(e) => WorkResult::Failed { what, err: e.to_string() },
+        }
     }));
 }
 
@@ -111,11 +137,13 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         ui.set_width(420.);
         let p = palette(ui.visuals().dark_mode);
         let Some(d) = app.state.join.as_ref() else { return };
-        dialog_title(ui, tr(lang, Key::GroupJoinTitle));
+        let kind = d.link.kind;
+        let k = |group, channel| tr(lang, pick(kind, group, channel));
+        dialog_title(ui, k(Key::GroupJoinTitle, Key::ChannelJoinTitle));
         if d.looking {
             ui.horizontal(|ui| {
                 ui.add(Spinner::new());
-                ui.label(tr(lang, Key::GroupLookingUp));
+                ui.label(k(Key::GroupLookingUp, Key::ChannelLookingUp));
             });
         }
         if let Some(i) = &d.info {
@@ -123,16 +151,17 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
             if !i.description.is_empty() {
                 ui.label(&i.description);
             }
-            ui.label(RichText::new(trf(lang, Key::MembersOnly, &[&i.subscribers.to_string()])).size(12.).color(p.text_dim));
+            let count = pick(kind, Key::MembersOnly, Key::ChannelSubscriberCount);
+            ui.label(RichText::new(trf(lang, count, &[&i.subscribers.to_string()])).size(12.).color(p.text_dim));
         } else if !d.looking {
-            ui.colored_label(p.danger, tr(lang, Key::GroupLookupFailed));
+            ui.colored_label(p.danger, k(Key::GroupLookupFailed, Key::ChannelLookupFailed));
         }
         ui.add_space(6.);
         let mediator: String = hex::encode_upper(d.link.mediator).chars().take(8).collect();
         ui.label(RichText::new(trf(lang, Key::ChannelJoinMediator, &[&mediator])).size(12.).color(p.text_dim));
         ui.add_space(6.);
-        ui.label(tr(lang, Key::GroupJoinPrompt));
-        ui.label(RichText::new(tr(lang, Key::GroupJoinWarning)).size(12.).color(p.text_dim));
+        ui.label(k(Key::GroupJoinPrompt, Key::ChannelJoinPrompt));
+        ui.label(RichText::new(k(Key::GroupJoinWarning, Key::ChannelJoinWarning)).size(12.).color(p.text_dim));
         if let Some(e) = &d.error {
             ui.colored_label(p.danger, e);
         }
@@ -140,11 +169,11 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
         if d.joining {
             ui.horizontal(|ui| {
                 ui.add(Spinner::new());
-                ui.label(tr(lang, Key::GroupJoining));
+                ui.label(k(Key::GroupJoining, Key::ChannelJoining));
             });
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            go = ui.add_enabled(started && !d.joining, primary_button(&p, tr(lang, Key::GroupJoinAction))).clicked();
+            go = ui.add_enabled(started && !d.joining, primary_button(&p, k(Key::GroupJoinAction, Key::ChannelJoinAction))).clicked();
             cancel = ui.add_enabled(!d.joining, egui::Button::new(tr(lang, Key::Cancel))).clicked();
         });
     });
@@ -291,6 +320,56 @@ mod tests {
         frames(&mut h);
         assert!(h.state().state.join.is_none());
         assert_eq!(h.state().state.selected, Some(ChatKey::Group(42)));
+    }
+
+    #[test]
+    fn channel_link_subscribes() {
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        let ctx = h.ctx.clone();
+        start_app(h.state_mut(), &ctx);
+        h.state_mut().state.core_started = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().rx = rx;
+        open(h.state_mut(), GroupLink { kind: LinkKind::Channel, ..link() });
+        frames(&mut h);
+        for text in ["Приглашение в канал", "Ищем канал…", "Подписаться на этот канал?"] {
+            assert!(h.query_by_label(text).is_some(), "{text}");
+        }
+        assert!(h.query_by_label_contains("При подписке вы регистрируетесь на медиаторе этого канала").is_some());
+        let t = token(&h);
+        done(&mut h, &tx, WorkResult::Preview { token: t, info: Some(mimir::ChannelInfo { flags: 1, subscribers: 40, ..info() }) });
+        assert!(h.query_by_label("40 подписчиков").is_some());
+        h.get_by_role_and_label(Role::Button, "Подписаться").click();
+        h.step();
+        frames(&mut h);
+        assert!(h.query_by_label("Подписываемся…").is_some());
+        done(&mut h, &tx, WorkResult::Failed { what: "join_public_channel", err: "no route".into() });
+        assert!(h.query_by_label_contains("Не удалось подписаться на канал: no route").is_some());
+        assert!(!h.state().state.join.as_ref().unwrap().joining);
+    }
+
+    #[test]
+    fn channel_link_to_a_group_is_no_preview() {
+        assert!(as_linked(true, &mimir::ChannelInfo { flags: CHAT_FLAG_CHANNEL, ..info() }));
+        assert!(as_linked(true, &mimir::ChannelInfo { flags: CHAT_FLAG_CHANNEL | 0x02, ..info() }), "a public channel");
+        assert!(!as_linked(true, &info()), "a group behind a channel link");
+        assert!(as_linked(false, &info()));
+    }
+
+    #[test]
+    fn channel_lookup_failure_still_allows_subscribing() {
+        let mut h = test_harness(Settings { intro_done: true, ..Default::default() });
+        let ctx = h.ctx.clone();
+        start_app(h.state_mut(), &ctx);
+        h.state_mut().state.core_started = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        h.state_mut().rx = rx;
+        open(h.state_mut(), GroupLink { kind: LinkKind::Channel, ..link() });
+        frames(&mut h);
+        let t = token(&h);
+        done(&mut h, &tx, WorkResult::Preview { token: t, info: None });
+        assert!(h.query_by_label("Не удалось связаться с медиатором, чтобы посмотреть канал. Подписаться всё равно можно.").is_some());
+        assert!(!h.get_by_role_and_label(Role::Button, "Подписаться").accesskit_node().is_disabled());
     }
 
     #[test]

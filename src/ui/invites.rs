@@ -6,7 +6,7 @@ use crate::{
     i18n::{tr, trf, Key},
     model::{chat_key::ChatKey, chat_list::display_name},
     media::avatar::resolve,
-    ui::{avatar::{self, avatar_seed_color}, theme::{dialog, dialog_title, palette, primary_button}},
+    ui::{avatar::{self, avatar_seed_color}, join_group::CHAT_FLAG_CHANNEL, theme::{dialog, dialog_title, palette, primary_button}},
 };
 use eframe::egui::{self, Align, Button, Id, Layout, RichText, ScrollArea, Spinner};
 use std::collections::HashMap;
@@ -128,6 +128,10 @@ pub fn show(app: &mut MimirDesktop, ctx: &egui::Context) {
                     avatar::show(ui, &mut app.state.thumbs, resolve(&app.paths.core_dir, &i.chat_avatar).as_deref(), base, 64., 4.);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&i.chat_name).size(16.).strong());
+                        // Android GroupInviteActivity names a channel invite as one: you will be reading, not talking.
+                        if i.flags & i32::from(CHAT_FLAG_CHANNEL) != 0 {
+                            ui.label(RichText::new(tr(lang, Key::ChannelJoinTitle)).size(12.).color(p.text_dim));
+                        }
                         if !i.chat_description.is_empty() {
                             ui.label(&i.chat_description);
                         }
@@ -275,6 +279,16 @@ mod tests {
         assert!(!h.state().state.show_invites);
         assert_eq!(h.state().state.mediators_ui.invitation.as_deref(), Some(&MED[..]));
         assert!(h.query_by_role_and_label(Role::Button, "Подключиться").is_some());
+    }
+
+    #[test]
+    fn a_channel_invite_says_so() {
+        let (mut h, tx) = started();
+        save(&h, 1, 10, "Дача");
+        h.state().core.save_group_invite(11, 2, FROM.to_vec(), 102, "Новости".into(), String::new(), None, vec![1; 8], vec![7; 32], 1).unwrap();
+        received(&mut h, &tx, 2, 11);
+        open_list(&mut h, 2);
+        assert_eq!(h.query_all_by_label("Приглашение в канал").count(), 1, "the channel's row only");
     }
 
     #[test]

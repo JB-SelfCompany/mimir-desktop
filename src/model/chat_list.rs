@@ -29,6 +29,16 @@ pub struct GroupRowInfo {
     pub muted: bool,
     pub read_only: bool,
     pub is_channel: bool,
+    /// We created the chat (its stored owner key is ours): in a channel, the only one who posts.
+    pub is_owner: bool,
+}
+
+impl GroupRowInfo {
+    /// A composer and forward target: not read-only, and in a channel only for its owner (the core drops a channel
+    /// post from anyone else, and a channel has no admins in v1).
+    pub fn can_post(self) -> bool {
+        !self.read_only && (!self.is_channel || self.is_owner)
+    }
 }
 
 /// Our outgoing contact request, as `MimirApp::get_outgoing_request_status` reports it.
@@ -142,7 +152,7 @@ fn group_row(app: &MimirApp, lang: Lang, g: StoredGroupChat) -> ChatRow {
         unread: g.unread_count,
         has_draft: draft.is_some(),
         request: Request::None,
-        group: Some(GroupRowInfo { muted: g.muted, read_only: g.read_only, is_channel: g.is_channel }),
+        group: Some(GroupRowInfo { muted: g.muted, read_only: g.read_only, is_channel: g.is_channel, is_owner: g.owner_pubkey == app.public_key() }),
     }
 }
 
@@ -261,8 +271,20 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.key).collect::<Vec<_>>(), [ChatKey::SAVED, ChatKey::Group(7), ChatKey::Contact(a)]);
         assert_eq!((rows[1].name.as_str(), rows[1].preview.as_str(), rows[1].unread, rows[1].time), ("Семья", "hi", 1, 3000));
         assert!(rows[1].pubkey.is_empty());
-        assert_eq!(rows[1].group, Some(GroupRowInfo { muted: false, read_only: false, is_channel: false }));
+        assert_eq!(rows[1].group, Some(GroupRowInfo { muted: false, read_only: false, is_channel: false, is_owner: false }));
         assert_eq!(rows[2].group, None);
+    }
+    #[test] fn channel_posting_is_the_owners() {
+        let (_t, app) = test_app();
+        app.save_group_chat(7, "Мой".into(), String::new(), None, vec![9; 32], app.public_key(), vec![3; 32], 1).unwrap();
+        app.save_group_chat(8, "Чужой".into(), String::new(), None, vec![9; 32], vec![4; 32], vec![3; 32], 1).unwrap();
+        app.save_group_chat(9, "Группа".into(), String::new(), None, vec![9; 32], vec![4; 32], vec![3; 32], 0).unwrap();
+        let rows = build_chat_list(&app, Lang::Ru);
+        let info = |id| rows.iter().find(|r| r.key == ChatKey::Group(id)).unwrap().group.unwrap();
+        assert!(info(7).is_channel && info(7).is_owner && info(7).can_post(), "our channel");
+        assert!(!info(8).is_owner && !info(8).can_post(), "a subscriber");
+        assert!(info(9).can_post(), "any member posts in a group");
+        assert!(!GroupRowInfo { read_only: true, ..info(7) }.can_post(), "a read-only channel, ours or not");
     }
     #[test] fn group_and_contact_with_same_id_stay_separate() {
         let (_t, app) = test_app();

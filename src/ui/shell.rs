@@ -110,9 +110,16 @@ fn toolbar(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette) {
                         mediators::open(app);
                     }
                 });
-                if icon_button(ui, Icon::NewChat, tr(lang, Key::NewChat)).clicked() {
-                    new_group::open(app);
-                }
+                // Android's main menu has «Создать группу» and «Создать канал» side by side.
+                let new_chat = icon_button(ui, Icon::NewChat, tr(lang, Key::NewChat));
+                egui::Popup::menu(&new_chat).show(|ui| {
+                    ui.set_min_width(170.);
+                    for (key, channel) in [(Key::CreateGroup, false), (Key::CreateChannel, true)] {
+                        if ui.button(tr(lang, key)).clicked() {
+                            new_group::open(app, channel);
+                        }
+                    }
+                });
                 if icon_button(ui, Icon::AddContact, tr(lang, Key::AddContact)).clicked() {
                     app.state.show_add_contact = true;
                 }

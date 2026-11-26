@@ -11,7 +11,7 @@ use crate::{
     app::MimirDesktop,
     core::events::Event,
     i18n::{tr, Key},
-    model::{group_link::{parse_group_link, LinkKind}, links::parse_contact},
+    model::{group_link::parse_group_link, links::parse_contact},
     ui::{add_contact, call, join_group},
 };
 use eframe::egui;
@@ -44,10 +44,7 @@ pub fn handle(app: &mut MimirDesktop, ctx: &egui::Context, ext: &Ext) {
     if link.trim().starts_with("mimir://gc/") {
         call::ask_join(app, link);
     } else if let Some(g) = parse_group_link(link) {
-        match g.kind {
-            LinkKind::Group => join_group::open(app, g),
-            LinkKind::Channel => app.error_text(tr(app.lang, Key::ChannelsNextVersion).to_string()),
-        }
+        join_group::open(app, g);
     } else if let Some((key, name)) = parse_contact(link) {
         add_contact::open_prefilled(app, &key, name);
     } else {

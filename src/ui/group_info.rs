@@ -175,19 +175,27 @@ fn take_cache(app: &mut MimirDesktop, id: i64) -> Option<Cache> {
             // ponytail: storage reads on the UI thread, once per chat or member change.
             let chat = app.core.get_group_chat(id)?;
             let mut members = app.core.get_members(id);
-            let me = my_role(&members, &app.core.public_key(), &chat.owner_pubkey);
+            // A channel has no member list to read permissions from: ownership is the stored owner key (Android).
+            let me = match chat.is_channel {
+                true if chat.owner_pubkey == app.core.public_key() => Role::Owner,
+                true => Role::User,
+                false => my_role(&members, &app.core.public_key(), &chat.owner_pubkey),
+            };
             sort_members(&mut members);
             Some(Cache { chat_id: id, chat, members, me })
         }
     }
 }
 
-/// The chat row's flags and whether the chat is read-only (stored flag or subscription state).
+/// The chat row's flags and whether the chat is read-only (stored flag or subscription state). Somebody else's
+/// channel never is here: its subscribers are read-only by design and still mute or unsubscribe (Android isChannel
+/// && !isOwner). Our own channel is, once deleted elsewhere: the mediator would refuse «Удалить канал».
+/// ponytail: so a channel its owner deleted offers «Отписаться», which the mediator refuses with an error.
 fn row_info(app: &MimirDesktop, id: i64) -> Option<(String, GroupRowInfo, bool)> {
     let r = app.state.chats.iter().find(|r| r.key == ChatKey::Group(id))?;
     let g = r.group?;
     let status_ro = app.state.open_chat.as_ref().is_some_and(|c| c.key == ChatKey::Group(id) && c.status == GroupStatus::ReadOnly);
-    Some((r.name.clone(), g, g.read_only || status_ro))
+    Some((r.name.clone(), g, (g.read_only || status_ro) && (!g.is_channel || g.is_owner)))
 }
 
 /// The invite link of a public chat; `None` without a 32-byte mediator key and shared key.
@@ -257,11 +265,16 @@ pub fn contents(app: &mut MimirDesktop, ui: &mut Ui, p: &Palette, id: i64) {
                 None => {}
             }
         }
-        if !info.is_channel {
+        // A public channel is joined by link, so there is nobody to add; a private one grows by invite. A channel
+        // discloses counts, never a roster.
+        let invite = manage && !(info.is_channel && c.chat.is_public);
+        if invite || !info.is_channel {
             ui.separator();
-            if manage && ui.add_sized([w, 28.], Button::new(tr(lang, Key::AddMembers))).clicked() {
-                picked = Some(Act::Invite);
-            }
+        }
+        if invite && ui.add_sized([w, 28.], Button::new(tr(lang, Key::AddMembers))).clicked() {
+            picked = Some(Act::Invite);
+        }
+        if !info.is_channel {
             ui.label(RichText::new(tr(lang, Key::Members)).size(11.).color(p.text_dim));
             for m in &c.members {
                 if let Some(d) = member_row(ui, p, lang, m, manage && m.pubkey != me_key, thumbs, data_dir) {
@@ -975,7 +988,7 @@ mod tests {
         start_app(h.state_mut(), &ctx);
         h.state_mut().state.core_started = true;
         h.state().core.add_mediator(MEDIATOR.to_vec(), "Семья".into()).unwrap();
-        crate::ui::new_group::open(h.state_mut());
+        crate::ui::new_group::open(h.state_mut(), false);
         h.run();
         set_picked(src.clone());
         h.get_by_label("Изменить аватар").click();
@@ -1144,10 +1157,13 @@ mod tests {
 
         let (h, _) = group(USER, 0, "");
         assert!(!in_panel(&h, "Добавить участников"), "owner or admin only");
-        let (h, _) = group(OWNER, CHANNEL, "");
-        assert!(!in_panel(&h, "Добавить участников"), "hidden for channels");
+        let (h, _) = group(OWNER, CHANNEL | PUBLIC, "");
+        assert!(!in_panel(&h, "Добавить участников"), "a public channel is joined by link");
         assert!(!in_panel(&h, "Участники"), "a channel has no member list");
         assert!(in_panel(&h, "Удалить канал"));
+        let (h, _) = group(OWNER, CHANNEL, "");
+        assert!(in_panel(&h, "Добавить участников"), "a private channel grows by invite");
+        assert!(!in_panel(&h, "Участники") && !in_panel(&h, "Аня"), "no roster");
     }
 
     #[test]
@@ -1167,6 +1183,28 @@ mod tests {
 
         let (h, _) = group(OWNER, 0, "");
         assert!(!in_panel(&h, "Ссылка приглашения"), "a private group grows by invite only");
+    }
+
+    #[test]
+    fn channel_subscriber_panel() {
+        // Somebody else's public channel, read-only by design (join_public_channel sets the flag); a stray admin
+        // member row does not make us one: a channel's owner is its stored key.
+        let (mut h, _) = group(ADMIN, CHANNEL | PUBLIC, "");
+        h.state().core.set_group_chat_read_only(7, true).unwrap();
+        h.state_mut().state.chats = build_chat_list(&h.state().core, Lang::Ru);
+        h.state_mut().state.group_ui.invalidate();
+        h.run();
+        for label in ["Сообщение", "Без звука", "Отписаться", "0 подписчиков, 0 в сети"] {
+            assert!(in_panel(&h, label), "{label}");
+        }
+        for label in ["Изменить", "Удалить канал", "Удалить", "Добавить участников", "Участники"] {
+            assert!(!in_panel(&h, label), "{label}");
+        }
+        let link = encode_group_link(&GroupLink { kind: LinkKind::Channel, mediator: MEDIATOR, chat_id: 7, key: KEY });
+        assert!(link.starts_with("mimir://c/") && in_panel(&h, &link), "the channel link, Android's encoding");
+        h.get_by_label("Копировать").click();
+        h.run();
+        assert_eq!(status(&h).as_deref(), Some("Ссылка на канал скопирована"));
     }
 
     #[test]
@@ -1210,6 +1248,21 @@ mod tests {
         h.run();
         assert_eq!(h.state().state.selected, None);
         assert_eq!(submitted(&h), [GroupOp::DeleteLocal(7)], "a local job only: no mediator call");
+    }
+
+    #[test]
+    fn owners_channel_deleted_elsewhere_is_deleted_locally() {
+        let (mut h, _tx) = group(OWNER, CHANNEL, "");
+        let core = h.state().core.clone();
+        core.set_group_chat_read_only(7, true).unwrap(); // ChatDeleted from our other device
+        h.state_mut().state.chats = build_chat_list(&core, Lang::Ru);
+        h.run();
+        for gone in ["Удалить канал", "Изменить"] {
+            assert!(!in_panel(&h, gone), "{gone}");
+        }
+        h.get_by_label("Удалить").click();
+        h.run();
+        assert!(h.query_by_label("Удалить этот чат с устройства?").is_some(), "a local delete, no mediator call");
     }
 
     #[test]
