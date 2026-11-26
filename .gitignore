@@ -1,3 +1,6 @@
 /target
 .superpowers/
 /docs/
+CLAUDE.md
+CLAUDE.local.md
+.claude/
