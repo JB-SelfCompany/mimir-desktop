@@ -129,7 +129,8 @@ mod tests {
         h.run_ok();
         wait_for_count(&mut h, 0);
         assert!(h.state().core.get_contact_by_pubkey(KEY.to_vec()).is_some());
-        assert!(h.state().state.chats.iter().any(|c| c.pubkey == KEY));
+        // The chat list rebuild lands after the request count drops.
+        crate::test_support::run_until(&mut h, "chat for the new contact", |h| h.state().state.chats.iter().any(|c| c.pubkey == KEY));
     }
 
     #[test] fn accepting_offline_requester_shows_no_status_line() {
