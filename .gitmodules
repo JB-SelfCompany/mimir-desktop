@@ -1,0 +1,6 @@
+[submodule "upstream/mimir"]
+	path = upstream/mimir
+	url = https://github.com/Mimir-IM/mimir
+[submodule "upstream/ygg_stream"]
+	path = upstream/ygg_stream
+	url = https://github.com/Revertron/ygg_stream

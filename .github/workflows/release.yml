@@ -8,10 +8,6 @@ permissions:
   contents: write
 env:
   CARGO_TERM_COLOR: always
-  MIMIR_REPO: https://github.com/Mimir-IM/mimir
-  MIMIR_REV: 883334b5990b4e07d6d3362f98777f23fb156664
-  YGG_STREAM_REPO: https://github.com/Revertron/ygg_stream
-  YGG_STREAM_REV: 94199be31bb099bde5a9cb4baed26544759bb5c7
   # LGPL static ffmpeg for Windows (BtbN month-end autobuilds are kept); its LICENSE.txt ships as FFMPEG-LICENSE.txt.
   FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-9.0.zip
   FFMPEG_SHA256: 9d37c564e0d01c18cde184a079fa6ef04d7d2783ada41da81d04165cc8f1a650
@@ -28,13 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: mimir-desktop
-      - name: Core sources (pinned)
-        shell: bash
-        run: |
-          for p in "mimir $MIMIR_REPO $MIMIR_REV" "ygg_stream $YGG_STREAM_REPO $YGG_STREAM_REV"; do
-            set -- $p
-            git init -q upstream/$1 && git -C upstream/$1 fetch -q --depth 1 $2 $3 && git -C upstream/$1 checkout -q FETCH_HEAD
-          done
+          submodules: true
       - name: Tag matches Cargo.toml
         if: github.ref_type == 'tag'
         shell: bash

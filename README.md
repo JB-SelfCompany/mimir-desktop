@@ -76,17 +76,15 @@ Once a day Mimir looks for a new release and shows a banner above the chat list;
 
 ## Building from source
 
-The core library is a path dependency, so clone it next to this repository:
+The core library comes in as git submodules pinned to the revisions this release is built against:
 
 ```sh
-git clone https://github.com/JB-SelfCompany/mimir-desktop
-git clone https://github.com/Mimir-IM/mimir upstream/mimir
-git clone https://github.com/Revertron/ygg_stream upstream/ygg_stream
+git clone --recursive https://github.com/JB-SelfCompany/mimir-desktop
 cd mimir-desktop
 cargo build --release
 ```
 
-The core revisions CI builds against are pinned in [`ci.yml`](.github/workflows/ci.yml). On Debian and Ubuntu install the system libraries first:
+In an existing clone, run `git submodule update --init` first. On Debian and Ubuntu install the system libraries first:
 
 ```sh
 sudo apt install libgtk-3-dev libasound2-dev libxkbcommon-dev libxdo-dev libayatana-appindicator3-dev pkg-config
