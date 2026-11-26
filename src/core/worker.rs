@@ -62,6 +62,10 @@ pub enum WorkResult {
     BackupPicked { path: Option<std::path::PathBuf>, valid: bool },
     /// The picked backup was staged for the next start (`err` `None`), which the app now relaunches into.
     BackupStaged { err: Option<String> },
+    /// An update check ended (`manual`: «Проверить обновления»): a newer release, none, or why it failed.
+    UpdateChecked { manual: bool, result: Result<Option<crate::platform::update::Release>, String> },
+    /// The update was swapped in for `exe` (`err` `None`), which the app now relaunches.
+    UpdateInstalled { exe: Option<std::path::PathBuf>, err: Option<String> },
     /// The Files section's listing.
     Files(Vec<crate::ui::settings::FileRow>),
     /// The Files section deleted `storage_name` (`err`: why it could not).

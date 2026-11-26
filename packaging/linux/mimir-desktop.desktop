@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mimir
+Comment=P2P messenger over Yggdrasil
+Exec=mimir-desktop %u
+Icon=mimir-desktop
+Terminal=false
+Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/mimir;

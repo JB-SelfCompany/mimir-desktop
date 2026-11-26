@@ -163,6 +163,8 @@ pub struct AppState {
     pub show_mediators: bool,
     pub mediators_ui: crate::ui::mediators::MediatorsUi,
     pub settings_ui: crate::ui::settings::SettingsUi,
+    /// The newest release found and the update's progress.
+    pub update: crate::platform::update::UpdateUi,
     /// Chat list width last chosen from the window size (the panel keeps a dragged width instead).
     pub list_auto: f32,
     pub add_dialog: AddContactDialog,

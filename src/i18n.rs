@@ -405,6 +405,18 @@ pub enum Key {
     ExitMimirDesc,
     ExitConfirmTitle,
     ExitConfirmMessage,
+    // Updates (Android strings; AutoUpdatesDesc and UpdateFailed are ours).
+    UpdatesTitle,
+    NewVersionAvailable,
+    AlreadyLastVersion,
+    ErrorCheckingUpdates,
+    DownloadingUpdate,
+    AutoUpdates,
+    AutoUpdatesDesc,
+    CheckForUpdates,
+    CheckForUpdatesDesc,
+    UpdateNow,
+    UpdateFailed,
 }
 
 /// Month names in the genitive ("12 ноября"), 1-based.
@@ -1200,6 +1212,28 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
         (Key::ExitConfirmTitle, Lang::En) => "Exit Mimir?",
         (Key::ExitConfirmMessage, Lang::Ru) => "Это разорвет все соединения и закроет приложение. Вы не сможете получать сообщения.",
         (Key::ExitConfirmMessage, Lang::En) => "This will stop all connections and close the app. You will not be able to get any messages.",
+        (Key::UpdatesTitle, Lang::Ru) => "Обновление Мимира",
+        (Key::UpdatesTitle, Lang::En) => "Mimir update",
+        (Key::NewVersionAvailable, Lang::Ru) => "Доступна новая версия %1$s",
+        (Key::NewVersionAvailable, Lang::En) => "New version %1$s available",
+        (Key::AlreadyLastVersion, Lang::Ru) => "Новых версий не обнаружено",
+        (Key::AlreadyLastVersion, Lang::En) => "No new version available.",
+        (Key::ErrorCheckingUpdates, Lang::Ru) => "Ошибка проверки обновлений: %s",
+        (Key::ErrorCheckingUpdates, Lang::En) => "Error checking for updates: %s",
+        (Key::DownloadingUpdate, Lang::Ru) => "Скачивание обновления…",
+        (Key::DownloadingUpdate, Lang::En) => "Downloading update…",
+        (Key::AutoUpdates, Lang::Ru) => "Автоматическая проверка обновлений",
+        (Key::AutoUpdates, Lang::En) => "Automatic updates checking",
+        (Key::AutoUpdatesDesc, Lang::Ru) => "Проверять наличие обновлений раз в сутки.",
+        (Key::AutoUpdatesDesc, Lang::En) => "Check for updates automatically once a day.",
+        (Key::CheckForUpdates, Lang::Ru) => "Проверить обновления",
+        (Key::CheckForUpdates, Lang::En) => "Check for updates",
+        (Key::CheckForUpdatesDesc, Lang::Ru) => "Проверить обновления прямо сейчас.",
+        (Key::CheckForUpdatesDesc, Lang::En) => "Check for updates right now.",
+        (Key::UpdateNow, Lang::Ru) => "Обновить",
+        (Key::UpdateNow, Lang::En) => "Update",
+        (Key::UpdateFailed, Lang::Ru) => "Обновление не установлено: %1$s",
+        (Key::UpdateFailed, Lang::En) => "Update not installed: %1$s",
     }
 }
 

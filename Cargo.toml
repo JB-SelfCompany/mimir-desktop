@@ -1,6 +1,6 @@
 [package]
 name = "mimir-desktop"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Desktop client for the Mimir P2P messenger (Yggdrasil)"
 license = "MPL-2.0"
@@ -40,6 +40,11 @@ tray-icon = "0.26"
 raw-window-handle = "0.6"
 # Desktop notifications (Windows toasts, freedesktop D-Bus on Linux).
 notify-rust = "4"
+# Self-update: GitHub Releases over HTTPS (rustls, ring, webpki roots), SHA-256 of the archive (sha2 0.11 as the core),
+# version compare (semver already built for the toolchain crates).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+sha2 = "0.11"
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 # The tray's message pump and raising the window from it (versions eframe and tray-icon already use).
@@ -51,6 +56,20 @@ gtk = "0.18"
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe"] }
 tempfile = "3"
+
+# The .deb (cargo deb --no-build in release.yml). $auto finds the linked libraries; the tray loads AppIndicator at
+# runtime and media needs the ffmpeg binary, so both are named. No revision: the file is mimir-desktop_<ver>_amd64.deb.
+[package.metadata.deb]
+maintainer = "JB-SelfCompany <JB-SelfCompany@users.noreply.github.com>"
+section = "net"
+revision = ""
+extended-description = "Peer-to-peer messenger over the Yggdrasil network, compatible with Mimir for Android."
+depends = "$auto, ffmpeg, libayatana-appindicator3-1"
+assets = [
+    ["target/release/mimir-desktop", "usr/bin/", "755"],
+    ["packaging/linux/mimir-desktop.desktop", "usr/share/applications/", "644"],
+    ["assets/icons/app.png", "usr/share/pixmaps/mimir-desktop.png", "644"],
+]
 
 # ygg_stream is a cdylib; at opt-level 0 share-generics exports >65535 symbols and gnu ld fails ("export ordinal too large").
 [profile.dev.package.ygg_stream]

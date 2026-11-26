@@ -231,19 +231,22 @@ pub fn import_staged(app: &mut MimirDesktop, ctx: &egui::Context, err: Option<&S
         Some(e) => job_failed(app, Job::Import, trf(app.lang, Key::BackupImportFailed, &[e])),
         None => {
             app.state.settings_ui.restarting = true;
-            relaunch(app, ctx);
+            relaunch(app, ctx, std::env::current_exe().ok());
         }
     }
 }
 
-/// Starts a new instance (same exe, args and environment) and quits this one for real (not to the tray); the new
-/// one waits for our instance lock (`platform::RELAUNCHED`) and our files (`backup::finish_pending` retries its renames).
-/// ponytail: if the spawn fails the app still quits, and the import is applied at the next manual start.
-fn relaunch(app: &mut MimirDesktop, ctx: &egui::Context) {
+/// Starts `exe` (args and environment as ours) and quits this one for real (not to the tray); the new one waits for
+/// our instance lock (`platform::RELAUNCHED`) and our files (`backup::finish_pending` retries its renames). `exe` is
+/// taken before an update swaps the file: after that the running image may report the `.old` name.
+/// ponytail: if the spawn fails the app still quits; the import (or the new version) is there at the next manual start.
+pub(crate) fn relaunch(app: &mut MimirDesktop, ctx: &egui::Context, exe: Option<PathBuf>) {
     #[cfg(not(test))]
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = exe {
         let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(crate::platform::RELAUNCHED, "1").spawn();
     }
+    #[cfg(test)]
+    drop(exe);
     app.quit(ctx);
 }
 

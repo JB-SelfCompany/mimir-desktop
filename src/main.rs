@@ -15,6 +15,7 @@ fn main() -> eframe::Result {
     std::thread::spawn(move || {
         platform::register_scheme();
         platform::register_app_id(&app_root);
+        platform::update::remove_old();
     });
     eframe::run_native(
         "Mimir",

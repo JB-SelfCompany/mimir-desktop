@@ -159,6 +159,7 @@ impl MimirDesktop {
         let settings = Settings::load(&paths.settings_file);
         let cfg = net::config_for(&paths, &settings);
         let mut app = Self::new_with(ctx, core, paths, settings, Some(cfg));
+        crate::platform::update::spawn_checker(app.paths.settings_file.clone(), app.events.clone(), ctx.clone());
         match restored {
             Ok(true) => app.notice(Key::BackupImportSuccess),
             Ok(false) => {}
@@ -457,6 +458,8 @@ impl MimirDesktop {
                 Event::WorkDone(WorkResult::BackupSaved { path, err }) => crate::ui::settings::backup_saved(self, path.as_ref(), err.as_ref()),
                 Event::WorkDone(WorkResult::BackupPicked { path, valid }) => crate::ui::settings::backup_picked(self, path.clone(), *valid),
                 Event::WorkDone(WorkResult::BackupStaged { err }) => crate::ui::settings::import_staged(self, ctx, err.as_ref()),
+                Event::WorkDone(WorkResult::UpdateChecked { manual, result }) => crate::platform::update::checked(self, *manual, result.clone()),
+                Event::WorkDone(WorkResult::UpdateInstalled { exe, err }) => crate::platform::update::installed(self, ctx, exe.clone(), err.clone()),
                 Event::WorkDone(WorkResult::AttachmentSent { chat, err }) => self.attachment_sent(*chat, err.as_ref()),
                 Event::WorkDone(WorkResult::DownloadFailed { guid, err }) => {
                     self.state.transfers.remove(guid);

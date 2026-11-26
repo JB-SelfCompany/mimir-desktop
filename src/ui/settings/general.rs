@@ -5,7 +5,8 @@ use crate::{
     i18n::{tr, trf, Key, Lang},
     model::chat_list::build_chat_list,
     settings::FONT_SIZES,
-    ui::{bubble, theme::{field_label, palette, primary_button}, welcome},
+    platform::update,
+    ui::{bubble, theme::{field_label, palette, primary_button, Palette}, welcome},
 };
 use eframe::egui::{self, vec2, Button, ComboBox, CornerRadius, FontFamily, FontId, Frame, OpenUrl, Rect, RichText, Role, Sense, Shape, Slider, Stroke, TextEdit, WidgetInfo};
 
@@ -186,5 +187,35 @@ pub fn about(app: &mut MimirDesktop, ui: &mut egui::Ui) {
     ui.label(RichText::new(tr(lang, Key::Links)).size(14.).family(FontFamily::Name("bold".into())).color(p.text));
     if ui.add_sized([180., 36.], Button::new("mimir.im").fill(p.field)).on_hover_text(SITE).clicked() {
         ui.ctx().open_url(OpenUrl::new_tab(SITE));
+    }
+    ui.add_space(16.);
+    updates(app, ui, &p);
+}
+
+/// Android's «Автоматическая проверка обновлений» switch and «Проверить обновления» row; the check's result under it,
+/// with «Обновить» when a newer version can be installed from here.
+fn updates(app: &mut MimirDesktop, ui: &mut egui::Ui, p: &Palette) {
+    let lang = app.lang;
+    if ui.checkbox(&mut app.settings.check_updates, tr(lang, Key::AutoUpdates)).changed() {
+        save(app);
+    }
+    ui.label(RichText::new(tr(lang, Key::AutoUpdatesDesc)).size(12.).color(p.text_dim));
+    ui.separator();
+    if super::advanced::action_row(ui, p, lang, Key::CheckForUpdates, Key::CheckForUpdatesDesc) && !app.state.update.checking {
+        update::check_now(app);
+    }
+    let u = &app.state.update;
+    if u.checking || u.installing {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            if u.installing {
+                ui.label(RichText::new(tr(lang, Key::DownloadingUpdate)).size(12.).color(p.text_dim));
+            }
+        });
+    } else if let Some((text, failed)) = &u.result {
+        ui.label(RichText::new(text).size(12.).color(if *failed { p.danger } else { p.accent }));
+    }
+    if !u.installing && u.found.as_ref().is_some_and(update::installable) && ui.add(primary_button(p, tr(lang, Key::UpdateNow))).clicked() {
+        update::start(app, &ui.ctx().clone());
     }
 }

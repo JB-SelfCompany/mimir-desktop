@@ -24,6 +24,8 @@ pub struct Settings {
     pub call_mediator: String,
     /// Keys of the last imported Android prefs file we do not use, written back on export.
     pub android_extra: Vec<PrefEntry>,
+    /// «Автоматическая проверка обновлений»: at start and once a day (`platform::update`).
+    pub check_updates: bool,
 }
 
 /// A Yggdrasil peer as Android's PeerProvider stores it (`+url` enabled, `-url` disabled).
@@ -101,6 +103,7 @@ impl Default for Settings {
             peers: default_peers(),
             call_mediator: String::new(),
             android_extra: vec![],
+            check_updates: true,
         }
     }
 }

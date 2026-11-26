@@ -3,6 +3,7 @@
 mod instance;
 pub mod notify;
 pub mod tray;
+pub mod update;
 
 pub use instance::{acquire, link_arg, Acquire, Instance, RELAUNCHED, RELAUNCH_WAIT};
 pub use tray::{file_dialog, show_window};
@@ -111,6 +112,9 @@ pub fn register_app_id(_root: &std::path::Path) {}
 /// ponytail: `exe` goes into Exec= quoted but unescaped; a path with `"`, `$`, `\` or `%` breaks the entry.
 #[cfg(target_os = "linux")]
 pub fn register_scheme() {
+    if !update::registers_scheme(update::this_install()) {
+        return;
+    }
     let (Ok(exe), Some(dirs)) = (std::env::current_exe(), directories::BaseDirs::new()) else { return };
     let apps = dirs.data_dir().join("applications");
     let entry = format!(

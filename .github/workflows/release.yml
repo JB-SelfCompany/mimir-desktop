@@ -1,7 +1,9 @@
 name: Release
+# A v* tag builds every asset and publishes the GitHub Release; a manual run builds the same assets as run artifacts only.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 permissions:
   contents: write
 env:
@@ -10,15 +12,17 @@ env:
   MIMIR_REV: 883334b5990b4e07d6d3362f98777f23fb156664
   YGG_STREAM_REPO: https://github.com/Revertron/ygg_stream
   YGG_STREAM_REV: 94199be31bb099bde5a9cb4baed26544759bb5c7
+  # LGPL static ffmpeg for Windows (BtbN month-end autobuilds are kept); its LICENSE.txt ships as FFMPEG-LICENSE.txt.
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-9.0.zip
+  FFMPEG_SHA256: 9d37c564e0d01c18cde184a079fa6ef04d7d2783ada41da81d04165cc8f1a650
+  # Inno Setup 6 (signed by its author), installed portable into the runner's temp dir: no preinstalled version assumed.
+  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe
+  INNO_SHA256: a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
 jobs:
   build:
     strategy:
       matrix:
-        include:
-          - os: ubuntu-24.04
-            archive: tar.gz
-          - os: windows-latest
-            archive: zip
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +35,13 @@ jobs:
             set -- $p
             git init -q upstream/$1 && git -C upstream/$1 fetch -q --depth 1 $2 $3 && git -C upstream/$1 checkout -q FETCH_HEAD
           done
+      - name: Tag matches Cargo.toml
+        if: github.ref_type == 'tag'
+        shell: bash
+        working-directory: mimir-desktop
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME != v$version (Cargo.toml)"; exit 1; }
       - name: System libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libasound2-dev libxkbcommon-dev libxdo-dev libayatana-appindicator3-dev pkg-config
@@ -45,16 +56,52 @@ jobs:
         shell: bash
         working-directory: mimir-desktop
         run: |
-          name=mimir-desktop-${GITHUB_REF_NAME}-${{ runner.os == 'Windows' && 'windows-x86_64' || 'linux-x86_64' }}
-          mkdir -p dist/$name
+          tag=${GITHUB_REF_NAME//\//-}  # a manual run on a branch: its name, / made -
+          name=mimir-desktop-$tag-${{ runner.os == 'Windows' && 'windows-x86_64' || 'linux-x86_64' }}
+          mkdir -p dist/$name out
           cp LICENSE README.md dist/$name/
           if [ "${{ runner.os }}" = Windows ]; then
             cp target/release/mimir-desktop.exe dist/$name/
-            (cd dist && 7z a -tzip ../$name.zip $name >/dev/null)
+            curl -fsSL -o ffmpeg.zip "$FFMPEG_URL"
+            echo "$FFMPEG_SHA256  ffmpeg.zip" | sha256sum -c -
+            7z x ffmpeg.zip -offmpeg >/dev/null
+            cp ffmpeg/*/bin/ffmpeg.exe dist/$name/
+            cp ffmpeg/*/LICENSE.txt dist/$name/FFMPEG-LICENSE.txt
+            (cd dist && 7z a -tzip ../out/$name.zip $name >/dev/null)
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            inno=$(cygpath -u "$RUNNER_TEMP")/inno
+            curl -fsSL -o inno.exe "$INNO_URL"
+            echo "$INNO_SHA256  inno.exe" | sha256sum -c -
+            MSYS_NO_PATHCONV=1 ./inno.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /PORTABLE=1 "/DIR=$(cygpath -w "$inno")"
+            MSYS_NO_PATHCONV=1 "$inno/ISCC.exe" /Q "/DVersion=$version" "/DTag=$tag" "/DSourceDir=$(cygpath -w "$PWD/dist/$name")" "/O$(cygpath -w "$PWD/out")" packaging/windows/mimir.iss
           else
             cp target/release/mimir-desktop dist/$name/
-            tar -C dist -czf $name.tar.gz $name
+            tar -C dist -czf out/$name.tar.gz $name
+            cargo install cargo-deb@3.8.0 --locked
+            cargo deb --no-build --locked --output out/
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: mimir-desktop/mimir-desktop-*.${{ matrix.archive }}
+          name: ${{ runner.os }}
+          path: mimir-desktop/out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: out
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: out/SHA256SUMS
+      - if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*

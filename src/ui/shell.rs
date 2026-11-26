@@ -3,6 +3,7 @@ use crate::{
     app::MimirDesktop,
     i18n::{tr, Key},
     model::Dot,
+    platform::update,
     ui::{add_contact, chat_list, info_panel, invites, join_group, mediators, new_group, profile, requests, settings, chat_view, theme::{palette, Palette}, welcome},
 };
 use eframe::egui::{
@@ -211,6 +212,11 @@ pub fn show(app: &mut MimirDesktop, ui: &mut Ui) {
             let n = invites::count(app);
             if n > 0 && banner(ui, &p, format!("{}: {n}", tr(app.lang, Key::GroupInvites))) {
                 invites::open_banner(app);
+            }
+            if let Some(text) = update::banner_text(app)
+                && banner(ui, &p, text)
+            {
+                update::start(app, &ui.ctx().clone());
             }
             status_line(app, ui, &p);
             chat_list::show(ui, &app.state.chats, &mut app.state.selected, &p, &mut app.state.thumbs, &app.paths.core_dir);

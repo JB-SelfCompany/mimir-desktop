@@ -1,4 +1,4 @@
-//! The external ffmpeg: looked for next to the executable, then on PATH; never bundled. It encodes voice
+//! The external ffmpeg: looked for next to the executable (the Windows release bundles one there), then on PATH. It encodes voice
 //! messages and makes video posters. Every call blocks: run them off the UI thread.
 use eframe::egui::Context;
 use std::{
