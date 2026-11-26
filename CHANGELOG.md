@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- Messages no longer jump when the mouse moves over them in busy group chats.
+- Delivery marks match Android: a ticked circle when delivered, an empty circle until then.
+- The app starts without a console window on Windows and carries its own icon in the taskbar, tray and Explorer.
+- Windows downloads are about three times smaller: they bundle a minimal ffmpeg built for Mimir.
+- Small layout fix in the chat list header.
+
 ## 1.0.0
 
 The first stable release.
